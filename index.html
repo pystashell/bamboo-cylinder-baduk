@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#101715" />
     <meta
       name="description"
-      content="一个左右首尾相接、支持平面、弧面与完整竹筒视图的3D围棋。"
+      content="一个左右首尾相接、支持蒙特卡洛 AI、在线对局以及平面、弧面与完整竹筒视图的3D围棋。"
     />
     <title>竹筒围棋</title>
   </head>
@@ -32,7 +32,7 @@
         <section class="board-stage" data-view-mode="arc" aria-label="竹筒围棋棋盘区域">
           <div id="flat-scene" class="view-surface" aria-label="可横向滑动的竹筒表面平面展开棋盘" hidden></div>
           <div id="arc-scene" class="view-surface" aria-label="可横向循环滑动的3D弧面棋盘"></div>
-          <div id="scene" class="view-surface" aria-label="可旋转的3D桶状围棋棋盘" hidden></div>
+          <div id="scene" class="view-surface" aria-label="可旋转的3D竹筒围棋棋盘" hidden></div>
 
           <div class="view-switch" role="group" aria-label="棋盘视图">
             <button type="button" data-view-mode="flat" aria-pressed="false">
@@ -70,7 +70,7 @@
         </section>
 
         <aside class="control-panel" aria-label="对局控制面板">
-          <section id="room-panel" class="room-panel" aria-label="联机房间">
+          <section id="room-panel" class="room-panel" aria-label="对局模式">
             <div class="room-summary">
               <div class="room-heading">
                 <span id="room-status-dot" class="room-status-dot offline" aria-hidden="true"></span>
@@ -79,9 +79,14 @@
                   <strong id="room-title">和朋友一起下棋</strong>
                 </span>
               </div>
-              <button id="open-online-dialog" class="secondary-button room-main-action" type="button">
-                联机
-              </button>
+              <div id="offline-opponent-actions" class="room-main-actions">
+                <button id="open-ai-dialog" class="secondary-button room-main-action ai-main-action" type="button">
+                  AI 对战
+                </button>
+                <button id="open-online-dialog" class="secondary-button room-main-action" type="button">
+                  联机
+                </button>
+              </div>
             </div>
 
             <div id="room-connected" class="room-connected" hidden>
@@ -105,6 +110,29 @@
                 </div>
               </div>
               <p id="room-hint" class="room-hint">正在连接房间…</p>
+            </div>
+
+            <div id="ai-connected" class="room-connected" hidden>
+              <div class="room-code-row">
+                <span>对手</span>
+                <strong class="ai-opponent-name">蒙特卡洛 AI</strong>
+                <span id="ai-level-badge" class="role-badge">普通</span>
+              </div>
+              <div class="seat-list" aria-label="人机对局座位">
+                <div>
+                  <span class="stone black small" aria-hidden="true"></span>
+                  <span id="ai-black-seat">你 · 黑方</span>
+                </div>
+                <div>
+                  <span class="stone white small" aria-hidden="true"></span>
+                  <span id="ai-white-seat">AI · 白方</span>
+                </div>
+              </div>
+              <div class="room-actions">
+                <button id="change-ai-settings" class="secondary-button" type="button">调整设置</button>
+                <button id="leave-ai" class="text-button" type="button">退出 AI</button>
+              </div>
+              <p id="ai-hint" class="room-hint">轮到你落子。</p>
             </div>
           </section>
 
@@ -241,6 +269,37 @@
         <p id="online-error" class="dialog-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button id="cancel-online" class="text-button" type="button">暂不联机</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="ai-dialog" class="game-dialog ai-dialog">
+      <form id="ai-form">
+        <span class="eyebrow">本机 AI 对手</span>
+        <h2>和蒙特卡洛 AI 下一盘</h2>
+        <p>AI 使用竹筒规则在浏览器后台思考，不需要账号、下载或第三方 API。</p>
+
+        <label class="dialog-field" for="ai-human-color">
+          <span>你执哪一方</span>
+          <select id="ai-human-color">
+            <option value="black">黑方 · 你先行</option>
+            <option value="white">白方 · AI 先行</option>
+          </select>
+        </label>
+
+        <label class="dialog-field" for="ai-difficulty">
+          <span>思考强度</span>
+          <select id="ai-difficulty">
+            <option value="easy">轻松 · 很快落子</option>
+            <option value="normal" selected>普通 · 推荐</option>
+            <option value="hard">认真 · 多想一会</option>
+          </select>
+        </label>
+
+        <p id="ai-level-note" class="ai-level-note">普通强度会在速度和搜索量之间取得平衡。</p>
+        <div class="dialog-actions">
+          <button id="cancel-ai" class="secondary-button" type="button">取消</button>
+          <button id="start-ai" class="primary-button" type="submit">开始对局</button>
         </div>
       </form>
     </dialog>

@@ -55,6 +55,8 @@ const elements = {
   roomStatusDot: $("#room-status-dot"),
   roomMode: $("#room-mode"),
   roomTitle: $("#room-title"),
+  offlineOpponentActions: $("#offline-opponent-actions"),
+  openAiDialog: $("#open-ai-dialog"),
   openOnlineDialog: $("#open-online-dialog"),
   roomConnected: $("#room-connected"),
   roomCode: $("#room-code"),
@@ -64,6 +66,20 @@ const elements = {
   blackSeat: $("#black-seat"),
   whiteSeat: $("#white-seat"),
   roomHint: $("#room-hint"),
+  aiConnected: $("#ai-connected"),
+  aiLevelBadge: $("#ai-level-badge"),
+  aiBlackSeat: $("#ai-black-seat"),
+  aiWhiteSeat: $("#ai-white-seat"),
+  aiHint: $("#ai-hint"),
+  changeAiSettings: $("#change-ai-settings"),
+  leaveAi: $("#leave-ai"),
+  aiDialog: $("#ai-dialog"),
+  aiForm: $("#ai-form"),
+  aiHumanColor: $("#ai-human-color"),
+  aiDifficulty: $("#ai-difficulty"),
+  aiLevelNote: $("#ai-level-note"),
+  cancelAi: $("#cancel-ai"),
+  startAi: $("#start-ai"),
   onlineDialog: $("#online-dialog"),
   onlineForm: $("#online-form"),
   playerName: $("#player-name"),
@@ -99,9 +115,39 @@ let onlineBusy = false;
 let onlineCommandPending = false;
 let lastAnnouncedRoomRevision = null;
 let offlineGameState = null;
+let aiActive = false;
+let aiHumanColor = BLACK;
+let aiDifficulty = "normal";
+let aiThinking = false;
+let aiWorker = null;
+let aiRequestId = 0;
 
 const PLAYER_NAME_KEY = "bamboo-baduk-player-name";
 const roomClient = new RoomClient();
+
+const AI_LEVELS = Object.freeze({
+  easy: {
+    label: "轻松",
+    timeMs: 180,
+    maxIterations: 90,
+    rolloutLimit: 70,
+    note: "轻松强度落子很快，适合第一次体验。",
+  },
+  normal: {
+    label: "普通",
+    timeMs: 650,
+    maxIterations: 320,
+    rolloutLimit: 110,
+    note: "普通强度会在速度和搜索量之间取得平衡。",
+  },
+  hard: {
+    label: "认真",
+    timeMs: 1_600,
+    maxIterations: 900,
+    rolloutLimit: 150,
+    note: "认真强度会搜索更多变化，较大棋盘可能需要多等一会。",
+  },
+});
 
 function colorName(color) {
   return color === BLACK ? "黑方" : "白方";
@@ -127,6 +173,201 @@ function cloneSerializable(value) {
 
 function hasOnlineSession() {
   return Boolean(roomClient.session && roomClient.roomCode);
+}
+
+function isAIMode() {
+  return aiActive && !hasOnlineSession();
+}
+
+function currentAILevel() {
+  return AI_LEVELS[aiDifficulty] ?? AI_LEVELS.normal;
+}
+
+function aiColor() {
+  return aiHumanColor === BLACK ? WHITE : BLACK;
+}
+
+function isAITurn() {
+  return isAIMode() && game?.phase === PHASE_PLAY && game.currentPlayer === aiColor();
+}
+
+function cancelAIThinking() {
+  aiRequestId += 1;
+  aiWorker?.terminate();
+  aiWorker = null;
+  aiThinking = false;
+  elements.boardStage?.removeAttribute("aria-busy");
+}
+
+function closeAIDialog() {
+  if (typeof elements.aiDialog.close === "function") elements.aiDialog.close();
+  else elements.aiDialog.removeAttribute("open");
+}
+
+function updateAILevelNote() {
+  const level = AI_LEVELS[elements.aiDifficulty.value] ?? AI_LEVELS.normal;
+  elements.aiLevelNote.textContent = level.note;
+}
+
+function showAIDialog() {
+  if (hasOnlineSession()) {
+    setMessage("请先退出联机房间，再开始 AI 对局。", true);
+    return;
+  }
+  elements.aiHumanColor.value = aiHumanColor;
+  elements.aiDifficulty.value = aiDifficulty;
+  elements.startAi.textContent = isAIMode() ? "按新设置重开" : "开始对局";
+  updateAILevelNote();
+  if (typeof elements.aiDialog.showModal === "function") {
+    if (!elements.aiDialog.open) elements.aiDialog.showModal();
+  } else {
+    elements.aiDialog.setAttribute("open", "");
+  }
+}
+
+function applyAIMove(move, stats = {}) {
+  if (!isAITurn()) return;
+
+  let result = null;
+  if (move?.type === "play") result = game.play(move.row, move.col);
+  if (!result?.ok) {
+    move = { type: "pass" };
+    result = game.pass();
+  }
+  if (!result?.ok) {
+    setMessage("AI 暂时没有找到可执行的落子。", true);
+    updateUI();
+    return;
+  }
+
+  moveCount += 1;
+  if (move.type === "play") {
+    lastPlayedPoint = { row: move.row, col: move.col };
+    const captureMessage = result.captured?.length
+      ? `，提掉 ${result.captured.length} 子`
+      : "";
+    const searched = Number.isFinite(stats.iterations)
+      ? `（搜索 ${stats.iterations} 次）`
+      : "";
+    setMessage(`蒙特卡洛 AI 落子${captureMessage}${searched}。`);
+  } else {
+    lastPlayedPoint = null;
+    if (result.phase === PHASE_SCORING) {
+      setMessage("AI 也停一手，已进入点目。请标记死子后确认结果。");
+    } else {
+      setMessage("蒙特卡洛 AI 停一手，轮到你落子。");
+    }
+  }
+  updateUI();
+}
+
+function recoverFromAIError(message) {
+  if (!isAITurn()) return;
+  const result = game.pass();
+  if (result.ok) {
+    moveCount += 1;
+    lastPlayedPoint = null;
+  }
+  setMessage(`${message} AI 本手自动停一手，你可以继续对局或调整 AI 设置。`, true);
+  updateUI();
+}
+
+function maybeStartAITurn() {
+  if (!isAITurn() || aiThinking) return;
+
+  aiThinking = true;
+  elements.boardStage.setAttribute("aria-busy", "true");
+  setMessage(`蒙特卡洛 AI 正在思考 · ${currentAILevel().label}强度…`);
+  updateUI();
+  const requestId = ++aiRequestId;
+
+  window.setTimeout(() => {
+    if (requestId !== aiRequestId || !isAITurn()) return;
+    if (typeof Worker !== "function") {
+      aiThinking = false;
+      elements.boardStage.removeAttribute("aria-busy");
+      recoverFromAIError("当前浏览器不支持后台 AI 计算。");
+      return;
+    }
+
+    let worker;
+    try {
+      worker = new Worker(new URL("./ai/mctsWorker.js", import.meta.url), {
+        type: "module",
+      });
+    } catch (error) {
+      aiThinking = false;
+      elements.boardStage.removeAttribute("aria-busy");
+      recoverFromAIError(error.message || "AI 思考线程没有正常启动。");
+      return;
+    }
+    aiWorker = worker;
+    worker.addEventListener("message", (event) => {
+      const message = event.data ?? {};
+      if (message.id !== requestId || requestId !== aiRequestId) return;
+      worker.terminate();
+      aiWorker = null;
+      aiThinking = false;
+      elements.boardStage.removeAttribute("aria-busy");
+      if (message.type === "result") {
+        applyAIMove(message.move, message.stats);
+      } else if (message.code !== "AI_SEARCH_CANCELLED") {
+        recoverFromAIError(message.message || "AI 思考时发生错误。");
+      }
+    });
+    worker.addEventListener("error", (event) => {
+      if (requestId !== aiRequestId) return;
+      worker.terminate();
+      aiWorker = null;
+      aiThinking = false;
+      elements.boardStage.removeAttribute("aria-busy");
+      recoverFromAIError(event.message || "AI 思考线程没有正常启动。");
+    });
+    const level = currentAILevel();
+    worker.postMessage({
+      type: "think",
+      id: requestId,
+      state: game.exportState(),
+      options: {
+        difficulty: aiDifficulty,
+        timeLimitMs: level.timeMs,
+        maxIterations: level.maxIterations,
+        rolloutLimit: Math.min(level.rolloutLimit, game.size * game.size * 2),
+      },
+    });
+  }, 120);
+}
+
+async function startAIGame(event) {
+  event?.preventDefault();
+  if (hasOnlineSession()) {
+    closeAIDialog();
+    setMessage("请先退出联机房间，再开始 AI 对局。", true);
+    return;
+  }
+  cancelAIThinking();
+  aiHumanColor = elements.aiHumanColor.value === WHITE ? WHITE : BLACK;
+  aiDifficulty = Object.hasOwn(AI_LEVELS, elements.aiDifficulty.value)
+    ? elements.aiDifficulty.value
+    : "normal";
+  aiActive = true;
+  closeAIDialog();
+  await startNewGame();
+  setMessage(
+    aiHumanColor === BLACK
+      ? `AI 对局已开始：你执黑，蒙特卡洛 AI 执白。`
+      : `AI 对局已开始：蒙特卡洛 AI 执黑，正在思考第一手。`,
+  );
+  updateUI();
+  maybeStartAITurn();
+}
+
+function leaveAIGame() {
+  if (!isAIMode()) return;
+  cancelAIThinking();
+  aiActive = false;
+  setMessage("已退出 AI 对战；当前棋局保留为普通单机棋局。可继续由双方轮流落子。");
+  updateUI();
 }
 
 function currentRoomMember() {
@@ -241,6 +482,7 @@ function roomSeat(color) {
 
 function updateRoomUI() {
   const active = hasOnlineSession();
+  const aiMode = isAIMode();
   const connected = roomClient.connectionStatus === CONNECTION_STATUS.CONNECTED;
   const onlineReady = active && onlineRoom?.code === roomClient.roomCode && Boolean(onlineRoom.game);
   const identity = currentIdentity();
@@ -254,13 +496,45 @@ function updateRoomUI() {
     CONNECTION_STATUS.RECONNECTING,
   ].includes(roomClient.connectionStatus);
 
-  elements.roomStatusDot.classList.toggle("offline", !active);
-  elements.roomStatusDot.classList.toggle("connecting", active && connecting);
-  elements.roomStatusDot.classList.toggle("connected", active && connected);
-  elements.roomMode.textContent = active ? "在线房间" : "单机模式";
-  elements.roomTitle.textContent = active ? "和朋友共享同一盘棋" : "和朋友一起下棋";
-  elements.openOnlineDialog.hidden = active;
+  elements.roomStatusDot.classList.toggle("offline", !active && !aiMode);
+  elements.roomStatusDot.classList.toggle(
+    "connecting",
+    (active && connecting) || (aiMode && aiThinking),
+  );
+  elements.roomStatusDot.classList.toggle(
+    "connected",
+    (active && connected) || (aiMode && !aiThinking),
+  );
+  elements.roomMode.textContent = active
+    ? "在线房间"
+    : aiMode
+      ? "AI 对战"
+      : "单机模式";
+  elements.roomTitle.textContent = active
+    ? "和朋友共享同一盘棋"
+    : aiMode
+      ? `你执${colorName(aiHumanColor).replace("方", "")} · AI 执${colorName(aiColor()).replace("方", "")}`
+      : "选择电脑或朋友作为对手";
+  elements.offlineOpponentActions.hidden = active || aiMode;
   elements.roomConnected.hidden = !active;
+  elements.aiConnected.hidden = !aiMode;
+
+  if (aiMode) {
+    elements.aiLevelBadge.textContent = currentAILevel().label;
+    elements.aiBlackSeat.textContent = aiHumanColor === BLACK ? "你 · 黑方" : "AI · 黑方";
+    elements.aiWhiteSeat.textContent = aiHumanColor === WHITE ? "你 · 白方" : "AI · 白方";
+    if (aiThinking) {
+      elements.aiHint.textContent = `AI 正在思考 · ${currentAILevel().label}强度。你仍可旋转或切换视图。`;
+    } else if (game.phase === PHASE_SCORING) {
+      elements.aiHint.textContent = "点目中：请标记死子并确认结果，或恢复对局。";
+    } else if (game.phase === PHASE_FINISHED) {
+      elements.aiHint.textContent = "本局已经结束，可以建立新棋盘再来一局。";
+    } else if (game.currentPlayer === aiHumanColor) {
+      elements.aiHint.textContent = "轮到你落子。";
+    } else {
+      elements.aiHint.textContent = "轮到 AI，正在准备思考…";
+    }
+  }
 
   if (active) {
     const black = roomSeat(BLACK);
@@ -331,9 +605,13 @@ function updateRoomUI() {
     : canAbandonRoom
       ? "忘记房间"
       : "退出";
-  elements.passButton.disabled = active && !(
-    onlineControlsAvailable && hasBothPlayers && isOnlineTurn() && game.phase === PHASE_PLAY
-  );
+  elements.passButton.disabled = active
+    ? !(
+        onlineControlsAvailable && hasBothPlayers && isOnlineTurn() && game.phase === PHASE_PLAY
+      )
+    : aiMode && (
+        aiThinking || game.phase !== PHASE_PLAY || game.currentPlayer !== aiHumanColor
+      );
   elements.newGameButton.disabled = active && !(onlineControlsAvailable && isOnlineHost());
   elements.confirmScore.disabled = active && !(
     onlineControlsAvailable && isOnlinePlayer() && !ownScoreConfirmed
@@ -345,7 +623,9 @@ function updateRoomUI() {
       ? "确认同意结果"
       : "确认结果";
 
-  const canChangeOnlineSettings = !active || (onlineControlsAvailable && isOnlineHost());
+  const canChangeOnlineSettings = active
+    ? onlineControlsAvailable && isOnlineHost()
+    : !aiThinking;
   elements.customSize.disabled = !canChangeOnlineSettings;
   elements.scoringRule.disabled = !canChangeOnlineSettings;
   elements.komi.disabled = !canChangeOnlineSettings;
@@ -358,15 +638,26 @@ function rememberOfflineGame() {
     game: game.exportState(),
     moveCount,
     lastPlayedPoint: cloneSerializable(lastPlayedPoint),
+    ai: {
+      active: isAIMode(),
+      humanColor: aiHumanColor,
+      difficulty: aiDifficulty,
+    },
   };
 }
 
 function restoreOfflineGame() {
   if (!offlineGameState) return;
+  cancelAIThinking();
   const previousSize = game?.size;
   game = GoEngine.fromState(offlineGameState.game);
   moveCount = offlineGameState.moveCount;
   lastPlayedPoint = offlineGameState.lastPlayedPoint;
+  aiActive = Boolean(offlineGameState.ai?.active);
+  aiHumanColor = offlineGameState.ai?.humanColor === WHITE ? WHITE : BLACK;
+  aiDifficulty = Object.hasOwn(AI_LEVELS, offlineGameState.ai?.difficulty)
+    ? offlineGameState.ai.difficulty
+    : "normal";
   if (previousSize !== game.size) {
     cylinderView?.rebuild(game.size);
     flatView?.rebuild(game.size);
@@ -527,6 +818,7 @@ async function startNewGame() {
     await sendOnlineCommand("new_game", options);
     return;
   }
+  cancelAIThinking();
   game = new GoEngine(options);
   moveCount = 0;
   lastPlayedPoint = null;
@@ -536,6 +828,7 @@ async function startNewGame() {
   arcView?.rebuild(options.size);
   setMessage(`${options.size} 路筒面棋盘已准备好，黑方先行。`);
   updateUI();
+  maybeStartAITurn();
 }
 
 function hasProgress() {
@@ -600,9 +893,17 @@ function updateUI() {
   if (state.phase === PHASE_PLAY) {
     elements.phaseLabel.textContent = state.consecutivePasses
       ? "一方已停着"
-      : "对局中";
+      : isAIMode()
+        ? "AI 对战"
+        : "对局中";
     elements.turnStone.hidden = false;
-    elements.turnText.textContent = `${colorName(state.currentPlayer)}落子`;
+    elements.turnText.textContent = isAIMode()
+      ? aiThinking
+        ? "AI 正在思考"
+        : state.currentPlayer === aiHumanColor
+          ? "轮到你落子"
+          : "AI 准备落子"
+      : `${colorName(state.currentPlayer)}落子`;
     return;
   }
 
@@ -650,6 +951,15 @@ function handleBoardPoint({ row, col }) {
     return;
   }
 
+  if (
+    isAIMode() &&
+    game.phase === PHASE_PLAY &&
+    (aiThinking || game.currentPlayer !== aiHumanColor)
+  ) {
+    setMessage("现在轮到蒙特卡洛 AI 思考；你仍然可以旋转和切换棋盘视图。", true);
+    return;
+  }
+
   if (game.phase === PHASE_PLAY) {
     const result = game.play(row, col);
     if (!result.ok) {
@@ -663,6 +973,7 @@ function handleBoardPoint({ row, col }) {
       : "";
     setMessage(`${colorName(result.color)}落子${captureMessage}。`);
     updateUI();
+    maybeStartAITurn();
     return;
   }
 
@@ -699,6 +1010,10 @@ elements.passButton.addEventListener("click", () => {
     void sendOnlineCommand("pass");
     return;
   }
+  if (isAIMode() && (aiThinking || game.currentPlayer !== aiHumanColor)) {
+    setMessage("现在轮到蒙特卡洛 AI，不能替它停一手。", true);
+    return;
+  }
   const result = game.pass();
   if (!result.ok) return;
   moveCount += 1;
@@ -708,6 +1023,7 @@ elements.passButton.addEventListener("click", () => {
     setMessage(`${colorName(result.color)}停一手，轮到${colorName(result.nextPlayer)}。`);
   }
   updateUI();
+  maybeStartAITurn();
 });
 
 elements.confirmScore.addEventListener("click", () => {
@@ -731,6 +1047,7 @@ elements.resumeGame.addEventListener("click", () => {
   setMessage("已恢复对局，可以继续处理有争议的死活。",
   );
   updateUI();
+  maybeStartAITurn();
 });
 
 elements.newGameButton.addEventListener("click", requestNewGame);
@@ -844,6 +1161,8 @@ async function createOnlineRoom() {
     return;
   }
   rememberOfflineGame();
+  cancelAIThinking();
+  aiActive = false;
   rememberPlayerName(name);
   showOnlineError();
   setOnlineBusy(true, "create");
@@ -853,6 +1172,9 @@ async function createOnlineRoom() {
     closeOnlineDialog();
     setMessage(`房间 ${result.roomCode} 已创建，把邀请链接发给朋友吧。`);
   } catch (error) {
+    restoreOfflineGame();
+    updateUI();
+    maybeStartAITurn();
     showOnlineError(error.message || "创建房间失败，请稍后重试。");
   } finally {
     setOnlineBusy(false);
@@ -873,6 +1195,8 @@ async function joinOnlineRoom() {
     return;
   }
   rememberOfflineGame();
+  cancelAIThinking();
+  aiActive = false;
   rememberPlayerName(name);
   showOnlineError();
   setOnlineBusy(true, "join");
@@ -888,6 +1212,9 @@ async function joinOnlineRoom() {
         : "旁观者";
     setMessage(`已加入房间 ${result.roomCode}，你是${role}。`);
   } catch (error) {
+    restoreOfflineGame();
+    updateUI();
+    maybeStartAITurn();
     showOnlineError(error.message || "加入房间失败，请检查房间号。");
   } finally {
     setOnlineBusy(false);
@@ -925,6 +1252,7 @@ function returnToOffline(message) {
   restoreOfflineGame();
   setMessage(message);
   updateUI();
+  maybeStartAITurn();
 }
 
 async function leaveOnlineRoom() {
@@ -964,6 +1292,12 @@ async function leaveOnlineRoom() {
   }
 }
 
+elements.openAiDialog.addEventListener("click", showAIDialog);
+elements.changeAiSettings.addEventListener("click", showAIDialog);
+elements.cancelAi.addEventListener("click", closeAIDialog);
+elements.leaveAi.addEventListener("click", leaveAIGame);
+elements.aiDifficulty.addEventListener("change", updateAILevelNote);
+elements.aiForm.addEventListener("submit", (event) => void startAIGame(event));
 elements.openOnlineDialog.addEventListener("click", () => showOnlineDialog());
 elements.cancelOnline.addEventListener("click", closeOnlineDialog);
 elements.onlineForm.addEventListener("submit", (event) => event.preventDefault());
@@ -1050,6 +1384,7 @@ if (sharedRoomCode.length === 6) {
 window.addEventListener(
   "beforeunload",
   () => {
+    cancelAIThinking();
     cylinderView.destroy();
     flatView.destroy();
     arcView.destroy();
