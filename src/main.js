@@ -130,22 +130,22 @@ const AI_LEVELS = Object.freeze({
     label: "轻松",
     timeMs: 180,
     maxIterations: 90,
-    rolloutLimit: 70,
-    note: "轻松强度落子很快，适合第一次体验。",
+    rolloutLimit: 8,
+    note: "轻松强度会做基本攻防判断并很快落子，适合快速体验。",
   },
   normal: {
     label: "普通",
     timeMs: 650,
     maxIterations: 320,
-    rolloutLimit: 110,
-    note: "普通强度会在速度和搜索量之间取得平衡。",
+    rolloutLimit: 12,
+    note: "普通强度会兼顾基本攻防与搜索深度，适合作为默认对手。",
   },
   hard: {
     label: "认真",
     timeMs: 1_600,
     maxIterations: 900,
-    rolloutLimit: 150,
-    note: "认真强度会搜索更多变化，较大棋盘可能需要多等一会。",
+    rolloutLimit: 16,
+    note: "认真强度会在重点候选上搜索更多变化；较大棋盘仍是轻量级对手。",
   },
 });
 
@@ -249,13 +249,13 @@ function applyAIMove(move, stats = {}) {
     const searched = Number.isFinite(stats.iterations)
       ? `（搜索 ${stats.iterations} 次）`
       : "";
-    setMessage(`蒙特卡洛 AI 落子${captureMessage}${searched}。`);
+    setMessage(`战术搜索 AI 落子${captureMessage}${searched}。`);
   } else {
     lastPlayedPoint = null;
     if (result.phase === PHASE_SCORING) {
       setMessage("AI 也停一手，已进入点目。请标记死子后确认结果。");
     } else {
-      setMessage("蒙特卡洛 AI 停一手，轮到你落子。");
+      setMessage("战术搜索 AI 停一手，轮到你落子。");
     }
   }
   updateUI();
@@ -277,7 +277,7 @@ function maybeStartAITurn() {
 
   aiThinking = true;
   elements.boardStage.setAttribute("aria-busy", "true");
-  setMessage(`蒙特卡洛 AI 正在思考 · ${currentAILevel().label}强度…`);
+  setMessage(`战术搜索 AI 正在思考 · ${currentAILevel().label}强度…`);
   updateUI();
   const requestId = ++aiRequestId;
 
@@ -355,8 +355,8 @@ async function startAIGame(event) {
   await startNewGame();
   setMessage(
     aiHumanColor === BLACK
-      ? `AI 对局已开始：你执黑，蒙特卡洛 AI 执白。`
-      : `AI 对局已开始：蒙特卡洛 AI 执黑，正在思考第一手。`,
+      ? `AI 对局已开始：你执黑，战术搜索 AI 执白。`
+      : `AI 对局已开始：战术搜索 AI 执黑，正在思考第一手。`,
   );
   updateUI();
   maybeStartAITurn();
@@ -956,7 +956,7 @@ function handleBoardPoint({ row, col }) {
     game.phase === PHASE_PLAY &&
     (aiThinking || game.currentPlayer !== aiHumanColor)
   ) {
-    setMessage("现在轮到蒙特卡洛 AI 思考；你仍然可以旋转和切换棋盘视图。", true);
+    setMessage("现在轮到战术搜索 AI 思考；你仍然可以旋转和切换棋盘视图。", true);
     return;
   }
 
@@ -1011,7 +1011,7 @@ elements.passButton.addEventListener("click", () => {
     return;
   }
   if (isAIMode() && (aiThinking || game.currentPlayer !== aiHumanColor)) {
-    setMessage("现在轮到蒙特卡洛 AI，不能替它停一手。", true);
+    setMessage("现在轮到战术搜索 AI，不能替它停一手。", true);
     return;
   }
   const result = game.pass();

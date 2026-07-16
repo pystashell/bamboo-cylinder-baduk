@@ -2,28 +2,38 @@ import {
   BLACK,
   GoEngine,
   PHASE_PLAY,
+  WHITE,
 } from "../game/goEngine.js";
 
 export const MCTS_DIFFICULTIES = Object.freeze({
   easy: Object.freeze({
     iterations: 60,
     timeLimitMs: 200,
-    rolloutFactor: 0.7,
+    rolloutDepth: 8,
   }),
   medium: Object.freeze({
     iterations: 240,
     timeLimitMs: 700,
-    rolloutFactor: 1,
+    rolloutDepth: 12,
   }),
   hard: Object.freeze({
     iterations: 800,
     timeLimitMs: 1_800,
-    rolloutFactor: 1.35,
+    rolloutDepth: 16,
   }),
 });
 
 const PASS_MOVE = Object.freeze({ type: "pass" });
 const DEFAULT_EXPLORATION = Math.SQRT2;
+const TACTICAL_CAPTURE = 5;
+const TACTICAL_RESCUE = 4;
+const TACTICAL_ATARI = 3;
+
+const SEARCH_SHAPE = Object.freeze({
+  easy: Object.freeze({ candidateLimit: 10, rolloutCandidates: 6, epsilon: 0.3 }),
+  medium: Object.freeze({ candidateLimit: 14, rolloutCandidates: 8, epsilon: 0.2 }),
+  hard: Object.freeze({ candidateLimit: 18, rolloutCandidates: 10, epsilon: 0.12 }),
+});
 
 export class SearchCancelledError extends Error {
   constructor(message = "AI search was cancelled") {
@@ -98,8 +108,11 @@ function normalizeOptions(options, size) {
   ) {
     throw new RangeError("timeLimitMs must be a non-negative number or Infinity");
   }
+  // Tactical evaluation is much more informative than playing a nearly random
+  // game to the end. Short rollouts also keep one iteration bounded on 19x19,
+  // so cancellation and the UI time budget remain responsive.
   const rolloutLimit = positiveInteger(
-    options.rolloutLimit ?? Math.ceil(size * size * preset.rolloutFactor),
+    options.rolloutLimit ?? preset.rolloutDepth,
     "rolloutLimit",
   );
   const exploration = options.exploration ?? DEFAULT_EXPLORATION;
@@ -117,12 +130,33 @@ function normalizeOptions(options, size) {
     throw new TypeError("random must be a function");
   }
 
+  const shape = SEARCH_SHAPE[difficulty];
+  const candidateLimit = positiveInteger(
+    options.candidateLimit ?? shape.candidateLimit,
+    "candidateLimit",
+  );
+  const rolloutCandidates = positiveInteger(
+    options.rolloutCandidates ?? shape.rolloutCandidates,
+    "rolloutCandidates",
+  );
+  const rolloutEpsilon = options.rolloutEpsilon ?? shape.epsilon;
+  if (
+    !Number.isFinite(rolloutEpsilon) ||
+    rolloutEpsilon < 0 ||
+    rolloutEpsilon > 1
+  ) {
+    throw new RangeError("rolloutEpsilon must be a number in [0, 1]");
+  }
+
   return {
     difficulty,
     iterations,
     timeLimitMs,
     rolloutLimit,
     exploration,
+    candidateLimit,
+    rolloutCandidates,
+    rolloutEpsilon,
     yieldEveryIterations,
     clock,
     random,
@@ -160,11 +194,265 @@ function emptyPointMoves(state) {
   return moves;
 }
 
-function candidateMoves(state, random) {
-  if (state.phase !== PHASE_PLAY) return [];
-  // pop() is used during expansion. Keeping pass at index zero means ordinary
-  // placements are explored first, while pass remains available in every node.
-  return [PASS_MOVE, ...shuffle(emptyPointMoves(state), random)];
+function pointKey(row, col) {
+  return `${row},${col}`;
+}
+
+function includesPoint(points, row, col) {
+  return points.some((point) => point.row === row && point.col === col);
+}
+
+/**
+ * Build each string once and map all of its stones back to the shared record.
+ * GoEngine owns the topology, so groups crossing columns 0/size-1 are handled
+ * identically here and in the rules.
+ */
+function groupMap(game) {
+  const byStone = new Map();
+  const groups = [];
+  for (let row = 0; row < game.size; row += 1) {
+    for (let col = 0; col < game.size; col += 1) {
+      if (game.get(row, col) === null || byStone.has(pointKey(row, col))) {
+        continue;
+      }
+      const group = game.getGroup(row, col);
+      groups.push(group);
+      for (const stone of group.stones) {
+        byStone.set(pointKey(stone.row, stone.col), group);
+      }
+    }
+  }
+  return { byStone, groups };
+}
+
+function rawMoveAnalysis(game, groups, row, col, random) {
+  const player = game.currentPlayer;
+  const opponent = player === BLACK ? WHITE : BLACK;
+  const friendly = new Set();
+  const enemy = new Set();
+  const emptyLiberties = new Set();
+
+  for (const neighbour of game.neighbors(row, col)) {
+    const value = game.get(neighbour.row, neighbour.col);
+    if (value === null) {
+      emptyLiberties.add(pointKey(neighbour.row, neighbour.col));
+      continue;
+    }
+    const group = groups.byStone.get(pointKey(neighbour.row, neighbour.col));
+    if (value === player) friendly.add(group);
+    else if (value === opponent) enemy.add(group);
+  }
+
+  let capturedStones = 0;
+  let rescuedStones = 0;
+  let rescuedGroups = 0;
+  let atariStones = 0;
+  const resultingLiberties = new Set(emptyLiberties);
+
+  for (const group of friendly) {
+    for (const liberty of group.liberties) {
+      if (liberty.row !== row || liberty.col !== col) {
+        resultingLiberties.add(pointKey(liberty.row, liberty.col));
+      }
+    }
+    if (
+      group.liberties.length === 1 &&
+      includesPoint(group.liberties, row, col)
+    ) {
+      rescuedGroups += 1;
+      rescuedStones += group.stones.length;
+    }
+  }
+
+  for (const group of enemy) {
+    if (
+      group.liberties.length === 1 &&
+      includesPoint(group.liberties, row, col)
+    ) {
+      capturedStones += group.stones.length;
+      for (const stone of group.stones) {
+        resultingLiberties.add(pointKey(stone.row, stone.col));
+      }
+    } else if (
+      group.liberties.length === 2 &&
+      includesPoint(group.liberties, row, col)
+    ) {
+      atariStones += group.stones.length;
+    }
+  }
+
+  const neighbours = game.neighbors(row, col);
+  const ownEye =
+    neighbours.length >= 3 &&
+    neighbours.every((point) => game.get(point.row, point.col) === player);
+  const fragileResult = resultingLiberties.size <= 1;
+  const selfAtari = capturedStones === 0 && fragileResult;
+  const connections = Math.max(0, friendly.size - 1);
+  const edgeDistance = Math.min(row, game.size - 1 - row);
+  const openingLine = Math.min(3, Math.max(1, Math.floor(game.size / 3)));
+
+  let score = 0;
+  let tacticalPriority = 0;
+  if (capturedStones > 0) {
+    score += 50_000 + capturedStones * 1_200;
+    tacticalPriority = TACTICAL_CAPTURE;
+  }
+  if (rescuedStones > 0) {
+    score += 32_000 + rescuedStones * 900 + rescuedGroups * 2_000;
+    tacticalPriority = Math.max(tacticalPriority, TACTICAL_RESCUE);
+  }
+  if (atariStones > 0) {
+    score += 2_000 + atariStones * 180;
+    tacticalPriority = Math.max(tacticalPriority, TACTICAL_ATARI);
+  }
+  score += connections * 700;
+  score += resultingLiberties.size * 24;
+  score += friendly.size * 20 + enemy.size * 12;
+  score -= Math.abs(edgeDistance - openingLine) * 2;
+
+  // Connecting multiple endangered strings through their shared liberty is a
+  // forcing rescue, including the visually easy-to-miss cylinder seam case.
+  if (rescuedGroups >= 2 && resultingLiberties.size >= 2) {
+    score += 8_000;
+    tacticalPriority = Math.max(tacticalPriority, TACTICAL_RESCUE);
+  }
+  if (selfAtari) score -= 35_000 + friendly.size * 1_000;
+  if (ownEye && capturedStones === 0) score -= 60_000;
+
+  // Randomness only breaks equivalent positional ties. Seeded searches remain
+  // exactly reproducible, while different games do not all open at one point.
+  score += randomUnit(random) * 0.01;
+
+  return {
+    move: { type: "play", row, col },
+    score,
+    tacticalPriority,
+    capturedStones,
+    rescuedStones,
+    resultingLiberties: resultingLiberties.size,
+    snapbackLoss: 0,
+    selfAtari,
+    ownEye,
+  };
+}
+
+function refineFragileTactic(game, analysis) {
+  if (analysis.capturedStones + analysis.rescuedStones === 0) {
+    return analysis;
+  }
+
+  const trial = GoEngine.fromState(game.exportState());
+  const played = trial.play(analysis.move.row, analysis.move.col);
+  if (!played.ok) return analysis;
+
+  const group = trial.getGroup(analysis.move.row, analysis.move.col);
+  analysis.resultingLiberties = group.liberties.length;
+  if (group.liberties.length !== 1) return analysis;
+
+  // Read the immediate reply exactly. A capture that leaves the newly joined
+  // string on one liberty can be a snapback: attractive material now, followed
+  // by a larger forced loss one move later. Superko and suicide remain
+  // authoritative because the reply is tested by a cloned GoEngine.
+  const [reply] = group.liberties;
+  const response = trial.play(reply.row, reply.col);
+  const capturesPlayedStone =
+    response.ok &&
+    response.captured.some(
+      (stone) =>
+        stone.row === analysis.move.row && stone.col === analysis.move.col,
+    );
+  if (!capturesPlayedStone) return analysis;
+
+  analysis.snapbackLoss = response.captured.length;
+  const netLoss = response.captured.length - analysis.capturedStones;
+  if (netLoss > 0) {
+    analysis.score -=
+      70_000 + netLoss * 5_000 + analysis.rescuedStones * 2_000;
+  }
+  return analysis;
+}
+
+function rankedMoveEntries(
+  gameOrState,
+  settings,
+  limit,
+  includePass = true,
+  refineTactics = true,
+) {
+  const game =
+    gameOrState instanceof GoEngine
+      ? gameOrState
+      : GoEngine.fromState(gameOrState);
+  if (game.phase !== PHASE_PLAY) return [];
+  const groups = groupMap(game);
+  const entries = [];
+  let emptyCount = 0;
+
+  for (let row = 0; row < game.size; row += 1) {
+    for (let col = 0; col < game.size; col += 1) {
+      if (game.get(row, col) !== null) continue;
+      emptyCount += 1;
+      entries.push(rawMoveAnalysis(game, groups, row, col, settings.random));
+    }
+    cancellationCheck(settings);
+  }
+
+  entries.sort((left, right) => right.score - left.score);
+  if (refineTactics) {
+    // Exact one-ply reading clones the superko history, so reserve it for the
+    // shortlist that can actually enter this node. Rollouts use the cheap raw
+    // policy and leave exact legality to game.play().
+    const refinementLimit = Math.min(
+      entries.length,
+      Math.max(6, Math.min(limit, settings.candidateLimit) + 4),
+    );
+    for (let index = 0; index < refinementLimit; index += 1) {
+      entries[index] = refineFragileTactic(game, entries[index]);
+    }
+    entries.sort((left, right) => right.score - left.score);
+  }
+  const selected = entries.slice(0, limit);
+
+  // Reserve a little breadth for non-local strategy without allowing bad eyes
+  // or self-atari into a small tactical candidate set.
+  if (entries.length > limit && selected.length >= 4) {
+    const diversitySlots = Math.min(2, Math.floor(limit / 5));
+    const safeRemainder = entries
+      .slice(limit)
+      .filter((entry) => !entry.selfAtari && !entry.ownEye);
+    for (let slot = 0; slot < diversitySlots && safeRemainder.length > 0; slot += 1) {
+      const index = Math.floor(randomUnit(settings.random) * safeRemainder.length);
+      selected[selected.length - 1 - slot] = safeRemainder.splice(index, 1)[0];
+    }
+    selected.sort((left, right) => right.score - left.score);
+  }
+
+  if (includePass) {
+    const filledRatio = 1 - emptyCount / (game.size * game.size);
+    selected.push({
+      move: PASS_MOVE,
+      score:
+        game.consecutivePasses === 1
+          ? -1_500 + filledRatio * 5_000
+          : -3_000 + filledRatio * 3_000,
+      tacticalPriority: 0,
+      capturedStones: 0,
+      rescuedStones: 0,
+      resultingLiberties: Infinity,
+      snapbackLoss: 0,
+      selfAtari: false,
+      ownEye: false,
+    });
+    // Passing must compete on merit with ordinary plays. Keeping it at the end
+    // would make progressive widening hide pass until every placement had been
+    // expanded, causing the AI to fill its own eyes in settled positions.
+    selected.sort((left, right) => right.score - left.score);
+  }
+  return selected;
+}
+
+function candidateMoves(state, settings) {
+  return rankedMoveEntries(state, settings, settings.candidateLimit);
 }
 
 function applyMove(game, move) {
@@ -194,10 +482,16 @@ export function listLegalMoves(gameOrState, { includePass = true } = {}) {
   return moves;
 }
 
-function createNode(state, move = null) {
+function createNode(state, move = null, analysis = null) {
   return {
     state,
     move,
+    heuristic: analysis?.score ?? 0,
+    tacticalPriority: analysis?.tacticalPriority ?? 0,
+    capturedStones: analysis?.capturedStones ?? 0,
+    rescuedStones: analysis?.rescuedStones ?? 0,
+    resultingLiberties: analysis?.resultingLiberties ?? Infinity,
+    snapbackLoss: analysis?.snapbackLoss ?? 0,
     visits: 0,
     value: 0,
     children: [],
@@ -206,17 +500,30 @@ function createNode(state, move = null) {
 }
 
 function expand(node, settings) {
-  node.untriedMoves ??= candidateMoves(node.state, settings.random);
+  node.untriedMoves ??= candidateMoves(node.state, settings);
   if (node.untriedMoves.length === 0) return null;
+
+  // Progressive widening is essential on 19x19. With 80 simulations the old
+  // search opened 80 different children and learned nothing about any of them.
+  // This curve opens roughly sqrt(N) candidates and repeatedly revisits them.
+  const allowedChildren = Math.min(
+    settings.candidateLimit + 1,
+    1 + Math.floor(Math.sqrt(node.visits + 1)),
+  );
+  if (node.children.length >= allowedChildren) return null;
 
   const game = GoEngine.fromState(node.state);
   while (node.untriedMoves.length > 0) {
     cancellationCheck(settings);
-    const move = node.untriedMoves.pop();
-    const result = applyMove(game, move);
+    const analysis = node.untriedMoves.shift();
+    const result = applyMove(game, analysis.move);
     if (!result.ok) continue;
 
-    const child = createNode(game.exportState(), copyMove(move));
+    const child = createNode(
+      game.exportState(),
+      copyMove(analysis.move),
+      analysis,
+    );
     node.children.push(child);
     return child;
   }
@@ -236,7 +543,13 @@ function selectChild(node, rootPlayer, exploration, random) {
       child.visits === 0
         ? Infinity
         : exploration * Math.sqrt(logVisits / child.visits);
-    const score = exploitation + bonus;
+    // A small, decaying tactical prior breaks early UCB ties in favour of sane
+    // local moves without overwhelming evidence accumulated by simulations.
+    const prior =
+      (Math.max(-1, Math.min(1, child.heuristic / 50_000)) *
+        Math.sqrt(node.visits + 1)) /
+      (12 * (child.visits + 1));
+    const score = exploitation + bonus + prior;
     if (score > bestScore) {
       bestScore = score;
       best = [child];
@@ -253,31 +566,131 @@ function rolloutPassProbability(game, emptyCount) {
   return 0.002 + filledRatio * 0.08;
 }
 
-function playRandomMove(game, settings) {
-  const moves = shuffle(emptyPointMoves(game), settings.random);
+function playWeightedMove(game, settings) {
+  const emptyCount = emptyPointMoves(game).length;
   if (
-    randomUnit(settings.random) < rolloutPassProbability(game, moves.length)
+    randomUnit(settings.random) < rolloutPassProbability(game, emptyCount)
   ) {
     game.pass();
     return;
   }
 
-  // Illegal play() calls are transactional, so the same simulation can try a
-  // shuffled sequence until it finds a legal move under suicide and superko.
-  for (const move of moves) {
+  const entries = rankedMoveEntries(
+    game,
+    settings,
+    settings.rolloutCandidates,
+    false,
+    false,
+  );
+  if (randomUnit(settings.random) < settings.rolloutEpsilon) {
+    shuffle(entries, settings.random);
+  } else {
+    // Mostly prefer the best tactical handful, but keep a stochastic rollout
+    // distribution so MCTS compares lines instead of repeating one playout.
+    const head = entries.splice(0, Math.min(3, entries.length));
+    if (head.length > 1) {
+      const weights = head.map((_, index) => 3 - index);
+      let roll = randomUnit(settings.random) * weights.reduce((a, b) => a + b, 0);
+      let chosen = 0;
+      for (let index = 0; index < weights.length; index += 1) {
+        roll -= weights[index];
+        if (roll <= 0) {
+          chosen = index;
+          break;
+        }
+      }
+      const [first] = head.splice(chosen, 1);
+      entries.unshift(first, ...head);
+    } else {
+      entries.unshift(...head);
+    }
+  }
+
+  // Illegal play() calls are transactional. Try the ranked alternatives until
+  // exact suicide and positional-superko checks accept one.
+  for (const entry of entries) {
     cancellationCheck(settings);
-    if (game.play(move.row, move.col).ok) return;
+    if (game.play(entry.move.row, entry.move.col).ok) return;
   }
   game.pass();
 }
 
+function groupSafety(group) {
+  const stones = group.stones.length;
+  const liberties = group.liberties.length;
+  if (liberties === 1) return -4 - stones * 0.8;
+  if (liberties === 2) return -1.2 - stones * 0.15;
+  return Math.min(4, liberties) * 0.35 + Math.min(8, stones) * 0.12;
+}
+
+function reliableTerritory(game) {
+  const visited = new Set();
+  const territory = { [BLACK]: 0, [WHITE]: 0 };
+
+  for (let row = 0; row < game.size; row += 1) {
+    for (let col = 0; col < game.size; col += 1) {
+      const startKey = pointKey(row, col);
+      if (game.get(row, col) !== null || visited.has(startKey)) continue;
+      const pending = [{ row, col }];
+      const points = [];
+      const borders = new Set();
+      let boundaryEdges = 0;
+      visited.add(startKey);
+
+      while (pending.length > 0) {
+        const point = pending.pop();
+        points.push(point);
+        for (const neighbour of game.neighbors(point.row, point.col)) {
+          const value = game.get(neighbour.row, neighbour.col);
+          const key = pointKey(neighbour.row, neighbour.col);
+          if (value === null && !visited.has(key)) {
+            visited.add(key);
+            pending.push(neighbour);
+          } else if (value !== null) {
+            borders.add(value);
+            boundaryEdges += 1;
+          }
+        }
+      }
+
+      // A huge open region touching one colour is influence, not settled land.
+      // Count only compact, well-enclosed regions as reliable territory.
+      const compact = points.length <= Math.max(4, game.size);
+      const enclosed = boundaryEdges >= Math.max(3, points.length);
+      if (borders.size === 1 && compact && enclosed) {
+        territory[[...borders][0]] += points.length;
+      }
+    }
+  }
+  return territory;
+}
+
 function evaluate(game, rootPlayer) {
-  const score = game.score();
-  const difference =
-    rootPlayer === BLACK ? score.black - score.white : score.white - score.black;
-  // A smooth value preserves useful information from unfinished rollouts while
-  // remaining in the conventional MCTS [0, 1] reward range.
-  const scale = Math.max(3, game.size * 0.8);
+  let difference;
+  if (game.phase !== PHASE_PLAY) {
+    const score = game.score();
+    difference =
+      rootPlayer === BLACK
+        ? score.black - score.white
+        : score.white - score.black;
+  } else {
+    const { groups } = groupMap(game);
+    const safety = { [BLACK]: 0, [WHITE]: 0 };
+    const stones = { [BLACK]: 0, [WHITE]: 0 };
+    for (const group of groups) {
+      safety[group.color] += groupSafety(group);
+      stones[group.color] += group.stones.length;
+    }
+    const territory = reliableTerritory(game);
+    const opponent = rootPlayer === BLACK ? WHITE : BLACK;
+    difference =
+      (game.captures[rootPlayer] - game.captures[opponent]) * 2.5 +
+      (safety[rootPlayer] - safety[opponent]) +
+      (territory[rootPlayer] - territory[opponent]) * 0.9 +
+      (stones[rootPlayer] - stones[opponent]) * 0.12;
+  }
+  // Smooth bounded values preserve useful information from unfinished lines.
+  const scale = Math.max(4, game.size * 0.75);
   return 0.5 + 0.5 * Math.tanh(difference / scale);
 }
 
@@ -286,7 +699,7 @@ function rollout(state, rootPlayer, settings) {
   for (let ply = 0; ply < settings.rolloutLimit; ply += 1) {
     cancellationCheck(settings);
     if (game.phase !== PHASE_PLAY) break;
-    playRandomMove(game, settings);
+    playWeightedMove(game, settings);
   }
   return evaluate(game, rootPlayer);
 }
@@ -322,16 +735,48 @@ function runIteration(root, rootPlayer, settings) {
 
 function fallbackMove(state, settings) {
   const game = GoEngine.fromState(state);
-  for (const move of shuffle(emptyPointMoves(state), settings.random)) {
+  const ranked = rankedMoveEntries(
+    game,
+    settings,
+    Math.max(settings.candidateLimit, emptyPointMoves(state).length),
+  );
+  for (const entry of ranked) {
     cancellationCheck(settings);
-    if (game.play(move.row, move.col).ok) return copyMove(move);
+    if (applyMove(game, entry.move).ok) return copyMove(entry.move);
   }
   return { type: "pass" };
 }
 
 function chooseMostVisited(root, fallback) {
   if (root.children.length === 0) return { move: fallback, child: null };
-  const children = [...root.children].sort((left, right) => {
+  let pool = root.children;
+  const avoidsImmediateNetLoss = pool.filter(
+    (child) => child.snapbackLoss <= child.capturedStones,
+  );
+  if (avoidsImmediateNetLoss.length > 0) pool = avoidsImmediateNetLoss;
+  const forcingValue = Math.max(
+    0,
+    ...pool.map(
+      (child) =>
+        child.resultingLiberties >= 2
+          ? child.capturedStones * 1.1 + child.rescuedStones
+          : 0,
+    ),
+  );
+  // Urgent captures and rescues should not be voted down by noisy short
+  // rollouts, but compare their actual scale. A one-stone capture must not
+  // force the AI to abandon a much larger friendly string in atari.
+  if (forcingValue > 0) {
+    pool = pool.filter(
+      (child) =>
+        child.resultingLiberties >= 2 &&
+        child.capturedStones * 1.1 + child.rescuedStones === forcingValue,
+    );
+  }
+  const children = [...pool].sort((left, right) => {
+    if (forcingValue > 0 && right.heuristic !== left.heuristic) {
+      return right.heuristic - left.heuristic;
+    }
     if (right.visits !== left.visits) return right.visits - left.visits;
     const leftMean = left.visits === 0 ? 0 : left.value / left.visits;
     const rightMean = right.visits === 0 ? 0 : right.value / right.visits;
@@ -386,6 +831,8 @@ function finishSearch(search) {
       move: copyMove(child.move),
       visits: child.visits,
       winRate: child.visits === 0 ? 0.5 : child.value / child.visits,
+      resultingLiberties: child.resultingLiberties,
+      snapbackLoss: child.snapbackLoss,
     }));
 
   return {

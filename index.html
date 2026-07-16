@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#101715" />
     <meta
       name="description"
-      content="一个左右首尾相接、支持蒙特卡洛 AI、在线对局以及平面、弧面与完整竹筒视图的3D围棋。"
+      content="一个左右首尾相接、支持战术搜索 AI、在线对局以及平面、弧面与完整竹筒视图的3D围棋。"
     />
     <title>竹筒围棋</title>
   </head>
@@ -115,7 +115,7 @@
             <div id="ai-connected" class="room-connected" hidden>
               <div class="room-code-row">
                 <span>对手</span>
-                <strong class="ai-opponent-name">蒙特卡洛 AI</strong>
+                <strong class="ai-opponent-name">战术搜索 AI</strong>
                 <span id="ai-level-badge" class="role-badge">普通</span>
               </div>
               <div class="seat-list" aria-label="人机对局座位">
@@ -276,8 +276,8 @@
     <dialog id="ai-dialog" class="game-dialog ai-dialog">
       <form id="ai-form">
         <span class="eyebrow">本机 AI 对手</span>
-        <h2>和蒙特卡洛 AI 下一盘</h2>
-        <p>AI 使用竹筒规则在浏览器后台思考，不需要账号、下载或第三方 API。</p>
+        <h2>和战术搜索 AI 下一盘</h2>
+        <p>AI 会结合基本攻防判断与局面搜索，并在浏览器后台思考；不需要账号、下载或第三方 API。</p>
 
         <label class="dialog-field" for="ai-human-color">
           <span>你执哪一方</span>
