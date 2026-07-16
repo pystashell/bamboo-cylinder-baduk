@@ -17,13 +17,13 @@ function pointKey(row, col) {
 }
 
 /**
- * Build KataGo v7 inputs from the authoritative cylindrical GoEngine state.
+ * Build KataGo v7 inputs from the authoritative wrapped GoEngine state.
  *
  * The copied model uses NHWC tensors. Group liberties come from GoEngine, so
- * strings crossing columns 0/size-1 have the same liberty features here as in
- * actual play. We intentionally leave ladder and long move-history planes
- * empty because the compact game snapshot does not store enough information
- * to reconstruct them without weakening superko authority.
+ * strings crossing either enabled seam have the same liberty features here as
+ * in actual play. We intentionally leave ladder and long move-history planes
+ * empty because the compact game snapshot does not store enough information to
+ * reconstruct them without weakening superko authority.
  */
 export function buildCylinderFeatures(gameOrState) {
   const game =
@@ -111,7 +111,7 @@ export function buildCylinderFeatures(gameOrState) {
  *
  * KataGo was trained for a different topology, and its policy head does not
  * know this game's positional-superko history. Clone the complete state for
- * every probe so the same cylindrical capture, suicide and repetition rules
+ * every probe so the same topology-aware capture, suicide and repetition rules
  * used by actual play remain authoritative without mutating the live game.
  */
 export function buildLegalPolicyMask(gameOrState) {

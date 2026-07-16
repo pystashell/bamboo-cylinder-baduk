@@ -10,6 +10,10 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+function normalizeTopology(topology) {
+  return topology === "torus" ? "torus" : "cylinder";
+}
+
 function starIndices(size) {
   if (size === 19) return [3, 9, 15];
   if (size === 13) return [3, 6, 9];
@@ -21,12 +25,17 @@ function starIndices(size) {
 }
 
 export class FlatBoard {
-  constructor(container, { size = 19, onPoint, onHover, onPan } = {}) {
+  constructor(
+    container,
+    { size = 19, topology = "cylinder", onPoint, onHover, onPan } = {},
+  ) {
     this.container = container;
     this.onPoint = onPoint;
     this.onHover = onHover;
     this.onPan = onPan;
     this.size = size;
+    this.topology = normalizeTopology(topology);
+    this.wrapRows = this.topology === "torus";
     this.board = [];
     this.currentPlayer = "black";
     this.phase = "play";
@@ -34,6 +43,7 @@ export class FlatBoard {
     this.deadKeys = new Set();
     this.hoveredPoint = null;
     this.offsetColumns = 0;
+    this.offsetRows = 0;
     this.pointerState = null;
     this.snapFrame = null;
     this.movePreviewEnabled = true;
@@ -64,17 +74,27 @@ export class FlatBoard {
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
-    this.rebuild(size);
+    this.rebuild(size, this.topology);
   }
 
-  rebuild(size) {
+  rebuild(size, topology = this.topology) {
     this.size = size;
+    this.topology = normalizeTopology(topology);
+    this.wrapRows = this.topology === "torus";
+    this.container.dataset.topology = this.topology;
+    this.canvas.setAttribute(
+      "aria-label",
+      this.wrapRows
+        ? "环面围棋的平面展开视图。上下、左右分别首尾相接，可向任意方向拖动改变展开起点。"
+        : "竹筒围棋的平面展开视图。左右两侧首尾相接，可横向拖动改变展开起点。",
+    );
     this.board = Array.from({ length: size }, () => Array(size).fill(null));
     this.currentPlayer = "black";
     this.phase = "play";
     this.lastMove = null;
     this.deadKeys.clear();
     this.offsetColumns = 0;
+    this.offsetRows = 0;
     this.hoveredPoint = null;
     this.pointerState = null;
     this.container.classList.remove("dragging");
@@ -113,7 +133,7 @@ export class FlatBoard {
   }
 
   resetView() {
-    this.animateOffsetTo(0);
+    this.animateOffsetTo(0, 0);
   }
 
   resize() {
@@ -153,7 +173,10 @@ export class FlatBoard {
   }
 
   pointY(row) {
-    return this.frameY + (row + 0.5) * this.cell;
+    const visualRow = this.wrapRows
+      ? mod(row + this.offsetRows + 0.5, this.size)
+      : row + 0.5;
+    return this.frameY + visualRow * this.cell;
   }
 
   hitPoint(clientX, clientY) {
@@ -172,8 +195,12 @@ export class FlatBoard {
     const visualColumn = (x - this.frameX) / this.cell - 0.5;
     const logicalColumn = Math.round(visualColumn - this.offsetColumns);
     const col = mod(logicalColumn, this.size);
-    const row = Math.round((y - this.frameY) / this.cell - 0.5);
-    if (row < 0 || row >= this.size) return null;
+    const visualRow = (y - this.frameY) / this.cell - 0.5;
+    const logicalRow = Math.round(
+      visualRow - (this.wrapRows ? this.offsetRows : 0),
+    );
+    const row = this.wrapRows ? mod(logicalRow, this.size) : logicalRow;
+    if (!this.wrapRows && (row < 0 || row >= this.size)) return null;
 
     const nearestX = this.pointX(col);
     const directDistance = Math.abs(x - nearestX);
@@ -181,7 +208,10 @@ export class FlatBoard {
       directDistance,
       this.boardPixels - directDistance,
     );
-    const yDistance = Math.abs(y - this.pointY(row));
+    const directYDistance = Math.abs(y - this.pointY(row));
+    const yDistance = this.wrapRows
+      ? Math.min(directYDistance, this.boardPixels - directYDistance)
+      : directYDistance;
     if (xDistance > this.cell * 0.48 || yDistance > this.cell * 0.48) {
       return null;
     }
@@ -202,7 +232,8 @@ export class FlatBoard {
       id: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      startOffset: this.offsetColumns,
+      startColumnOffset: this.offsetColumns,
+      startRowOffset: this.offsetRows,
       moved: false,
       cancelClick: false,
     };
@@ -219,17 +250,25 @@ export class FlatBoard {
         pointer.cancelClick = true;
       }
       if (
-        Math.abs(deltaX) > DRAG_THRESHOLD &&
-        Math.abs(deltaX) > Math.abs(deltaY)
+        (this.wrapRows && Math.hypot(deltaX, deltaY) > DRAG_THRESHOLD) ||
+        (!this.wrapRows &&
+          Math.abs(deltaX) > DRAG_THRESHOLD &&
+          Math.abs(deltaX) > Math.abs(deltaY))
       ) {
         pointer.moved = true;
       }
       if (pointer.moved) {
         this.container.classList.add("dragging");
         this.offsetColumns = mod(
-          pointer.startOffset + deltaX / this.cell,
+          pointer.startColumnOffset + deltaX / this.cell,
           this.size,
         );
+        if (this.wrapRows) {
+          this.offsetRows = mod(
+            pointer.startRowOffset + deltaY / this.cell,
+            this.size,
+          );
+        }
         this.setHoveredPoint(null);
         this.draw();
         this.notifyPan();
@@ -247,7 +286,7 @@ export class FlatBoard {
     const crossedThreshold = Math.hypot(deltaX, deltaY) > DRAG_THRESHOLD;
     const horizontalDrag =
       Math.abs(deltaX) > DRAG_THRESHOLD && Math.abs(deltaX) > Math.abs(deltaY);
-    const moved = pointer.moved || horizontalDrag;
+    const moved = pointer.moved || (this.wrapRows ? crossedThreshold : horizontalDrag);
     this.pointerState = null;
     this.container.classList.remove("dragging");
     if (this.canvas.hasPointerCapture?.(event.pointerId)) {
@@ -257,13 +296,19 @@ export class FlatBoard {
     if (moved) {
       if (!pointer.moved) {
         this.offsetColumns = mod(
-          pointer.startOffset + deltaX / this.cell,
+          pointer.startColumnOffset + deltaX / this.cell,
           this.size,
         );
+        if (this.wrapRows) {
+          this.offsetRows = mod(
+            pointer.startRowOffset + deltaY / this.cell,
+            this.size,
+          );
+        }
         this.draw();
         this.notifyPan();
       }
-      this.snapToColumn();
+      this.snapToGrid();
       return;
     }
     if (pointer.cancelClick || crossedThreshold) return;
@@ -276,7 +321,7 @@ export class FlatBoard {
     this.pointerState = null;
     this.container.classList.remove("dragging");
     this.setHoveredPoint(null);
-    this.snapToColumn();
+    this.snapToGrid();
   }
 
   setHoveredPoint(point) {
@@ -290,16 +335,30 @@ export class FlatBoard {
   }
 
   snapToColumn() {
-    const nearest = Math.round(this.offsetColumns);
-    this.animateOffsetTo(nearest);
+    this.snapToGrid();
   }
 
-  animateOffsetTo(target) {
+  snapToGrid() {
+    this.animateOffsetTo(
+      Math.round(this.offsetColumns),
+      this.wrapRows ? Math.round(this.offsetRows) : 0,
+    );
+  }
+
+  animateOffsetTo(targetColumns, targetRows = this.offsetRows) {
     this.cancelSnap();
-    const start = this.offsetColumns;
-    let adjustedTarget = target;
-    while (adjustedTarget - start > this.size / 2) adjustedTarget -= this.size;
-    while (adjustedTarget - start < -this.size / 2) adjustedTarget += this.size;
+    const startColumns = this.offsetColumns;
+    const startRows = this.offsetRows;
+    let adjustedColumns = targetColumns;
+    let adjustedRows = this.wrapRows ? targetRows : 0;
+    while (adjustedColumns - startColumns > this.size / 2) {
+      adjustedColumns -= this.size;
+    }
+    while (adjustedColumns - startColumns < -this.size / 2) {
+      adjustedColumns += this.size;
+    }
+    while (adjustedRows - startRows > this.size / 2) adjustedRows -= this.size;
+    while (adjustedRows - startRows < -this.size / 2) adjustedRows += this.size;
     const startedAt = performance.now();
     const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches
       ? 0
@@ -308,13 +367,18 @@ export class FlatBoard {
     const step = (now) => {
       const progress = duration === 0 ? 1 : Math.min(1, (now - startedAt) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
-      this.offsetColumns = start + (adjustedTarget - start) * eased;
+      this.offsetColumns =
+        startColumns + (adjustedColumns - startColumns) * eased;
+      this.offsetRows = this.wrapRows
+        ? startRows + (adjustedRows - startRows) * eased
+        : 0;
       this.draw();
       this.notifyPan();
       if (progress < 1) {
         this.snapFrame = requestAnimationFrame(step);
       } else {
-        this.offsetColumns = mod(adjustedTarget, this.size);
+        this.offsetColumns = mod(adjustedColumns, this.size);
+        this.offsetRows = this.wrapRows ? mod(adjustedRows, this.size) : 0;
         this.snapFrame = null;
         this.draw();
         this.notifyPan();
@@ -331,7 +395,15 @@ export class FlatBoard {
   notifyPan() {
     if (!this.onPan) return;
     const startCol = mod(-Math.round(this.offsetColumns), this.size);
-    this.onPan({ startCol, offsetColumns: this.offsetColumns });
+    const startRow = this.wrapRows
+      ? mod(-Math.round(this.offsetRows), this.size)
+      : 0;
+    this.onPan({
+      startCol,
+      startRow,
+      offsetColumns: this.offsetColumns,
+      offsetRows: this.offsetRows,
+    });
   }
 
   draw() {
@@ -404,8 +476,13 @@ export class FlatBoard {
     for (let col = 0; col < this.size; col += 1) {
       const x = this.pointX(col);
       context.beginPath();
-      context.moveTo(x, this.pointY(0));
-      context.lineTo(x, this.pointY(this.size - 1));
+      context.moveTo(x, this.wrapRows ? this.frameY : this.pointY(0));
+      context.lineTo(
+        x,
+        this.wrapRows
+          ? this.frameY + this.boardPixels
+          : this.pointY(this.size - 1),
+      );
       context.stroke();
     }
     context.restore();
@@ -421,11 +498,16 @@ export class FlatBoard {
     const radius = clamp(this.cell * 0.105, 1.7, 4.2);
     for (const row of stars) {
       for (const col of stars) {
-        this.forEachWrappedX(this.pointX(col), radius, (x) => {
-          context.beginPath();
-          context.arc(x, this.pointY(row), radius, 0, TAU);
-          context.fill();
-        });
+        this.forEachWrappedPoint(
+          this.pointX(col),
+          this.pointY(row),
+          radius,
+          (x, y) => {
+            context.beginPath();
+            context.arc(x, y, radius, 0, TAU);
+            context.fill();
+          },
+        );
       }
     }
     context.restore();
@@ -438,6 +520,30 @@ export class FlatBoard {
         shiftedX - radius <= this.frameX + this.boardPixels
       ) {
         callback(shiftedX);
+      }
+    }
+  }
+
+  forEachWrappedPoint(x, y, radius, callback) {
+    const yOffsets = this.wrapRows
+      ? [-this.boardPixels, 0, this.boardPixels]
+      : [0];
+    for (const shiftedX of [x - this.boardPixels, x, x + this.boardPixels]) {
+      if (
+        shiftedX + radius < this.frameX ||
+        shiftedX - radius > this.frameX + this.boardPixels
+      ) {
+        continue;
+      }
+      for (const yOffset of yOffsets) {
+        const shiftedY = y + yOffset;
+        if (
+          !this.wrapRows ||
+          (shiftedY + radius >= this.frameY &&
+            shiftedY - radius <= this.frameY + this.boardPixels)
+        ) {
+          callback(shiftedX, shiftedY);
+        }
       }
     }
   }
@@ -455,20 +561,25 @@ export class FlatBoard {
         const color = this.board[row]?.[col];
         if (!color) continue;
         const dead = this.deadKeys.has(`${row},${col}`);
-        this.forEachWrappedX(this.pointX(col), radius, (x) => {
-          this.drawStone(context, x, this.pointY(row), radius, color, dead);
-          if (
-            this.lastMove?.type === "play" &&
-            this.lastMove.row === row &&
-            this.lastMove.col === col
-          ) {
-            context.beginPath();
-            context.arc(x, this.pointY(row), radius * 0.24, 0, TAU);
-            context.strokeStyle = "#d9aa58";
-            context.lineWidth = Math.max(1.5, radius * 0.11);
-            context.stroke();
-          }
-        });
+        this.forEachWrappedPoint(
+          this.pointX(col),
+          this.pointY(row),
+          radius,
+          (x, y) => {
+            this.drawStone(context, x, y, radius, color, dead);
+            if (
+              this.lastMove?.type === "play" &&
+              this.lastMove.row === row &&
+              this.lastMove.col === col
+            ) {
+              context.beginPath();
+              context.arc(x, y, radius * 0.24, 0, TAU);
+              context.strokeStyle = "#d9aa58";
+              context.lineWidth = Math.max(1.5, radius * 0.11);
+              context.stroke();
+            }
+          },
+        );
       }
     }
     context.restore();
@@ -534,20 +645,29 @@ export class FlatBoard {
     context.rect(this.frameX, this.frameY, this.boardPixels, this.boardPixels);
     context.clip();
     context.globalAlpha = 0.48;
-    this.forEachWrappedX(this.pointX(point.col), radius, (x) => {
-      this.drawStone(
-        context,
-        x,
-        this.pointY(point.row),
-        radius,
-        this.currentPlayer,
-        false,
-      );
-    });
+    this.forEachWrappedPoint(
+      this.pointX(point.col),
+      this.pointY(point.row),
+      radius,
+      (x, y) => {
+        this.drawStone(
+          context,
+          x,
+          y,
+          radius,
+          this.currentPlayer,
+          false,
+        );
+      },
+    );
     context.restore();
   }
 
   drawSeam(context) {
+    if (this.wrapRows) {
+      this.drawTorusSeam(context);
+      return;
+    }
     const left = this.frameX;
     const right = this.frameX + this.boardPixels;
     const top = this.frameY;
@@ -614,6 +734,76 @@ export class FlatBoard {
     context.restore();
   }
 
+  drawTorusSeam(context) {
+    const left = this.frameX;
+    const right = this.frameX + this.boardPixels;
+    const top = this.frameY;
+    const bottom = this.frameY + this.boardPixels;
+    const accent = "rgba(230, 185, 105, 0.95)";
+
+    context.save();
+    const horizontalGlow = 18;
+    const verticalGlow = 18;
+    const leftGlow = context.createLinearGradient(left, 0, left + horizontalGlow, 0);
+    leftGlow.addColorStop(0, "rgba(230, 185, 105, 0.24)");
+    leftGlow.addColorStop(1, "rgba(230, 185, 105, 0)");
+    context.fillStyle = leftGlow;
+    context.fillRect(left, top, horizontalGlow, this.boardPixels);
+
+    const rightGlow = context.createLinearGradient(right - horizontalGlow, 0, right, 0);
+    rightGlow.addColorStop(0, "rgba(230, 185, 105, 0)");
+    rightGlow.addColorStop(1, "rgba(230, 185, 105, 0.24)");
+    context.fillStyle = rightGlow;
+    context.fillRect(right - horizontalGlow, top, horizontalGlow, this.boardPixels);
+
+    const topGlow = context.createLinearGradient(0, top, 0, top + verticalGlow);
+    topGlow.addColorStop(0, "rgba(230, 185, 105, 0.24)");
+    topGlow.addColorStop(1, "rgba(230, 185, 105, 0)");
+    context.fillStyle = topGlow;
+    context.fillRect(left, top, this.boardPixels, verticalGlow);
+
+    const bottomGlow = context.createLinearGradient(0, bottom - verticalGlow, 0, bottom);
+    bottomGlow.addColorStop(0, "rgba(230, 185, 105, 0)");
+    bottomGlow.addColorStop(1, "rgba(230, 185, 105, 0.24)");
+    context.fillStyle = bottomGlow;
+    context.fillRect(left, bottom - verticalGlow, this.boardPixels, verticalGlow);
+
+    context.strokeStyle = accent;
+    context.lineWidth = 2;
+    context.setLineDash([6, 6]);
+    context.strokeRect(left, top, this.boardPixels, this.boardPixels);
+    context.setLineDash([]);
+
+    const labelSize = clamp(this.cell * 0.3, 10, 13);
+    context.font = `500 ${labelSize}px Inter, "Microsoft YaHei", sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = "rgba(228, 233, 229, 0.84)";
+    if (this.width >= 560) {
+      context.fillText(
+        "↔ 左右相接 · ↕ 上下相接 · 任意方向拖动",
+        (left + right) / 2,
+        top - 30,
+      );
+    }
+
+    context.fillStyle = accent;
+    context.font = `500 ${clamp(labelSize * 0.9, 9, 11)}px Inter, "Microsoft YaHei", sans-serif`;
+    context.save();
+    context.translate(left - 20, (top + bottom) / 2);
+    context.rotate(-Math.PI / 2);
+    context.fillText("与右侧相接", 0, 0);
+    context.restore();
+    context.save();
+    context.translate(right + 20, (top + bottom) / 2);
+    context.rotate(Math.PI / 2);
+    context.fillText("与左侧相接", 0, 0);
+    context.restore();
+    context.fillText("与下侧相接", (left + right) / 2, top + 12);
+    context.fillText("与上侧相接", (left + right) / 2, bottom - 12);
+    context.restore();
+  }
+
   drawColumnLabels(context) {
     if (this.cell < 10) return;
     const labelSize = clamp(this.cell * 0.24, 8, 11);
@@ -627,6 +817,16 @@ export class FlatBoard {
       const label = COORDINATE_LETTERS[col] || String(col + 1);
       context.fillText(label, x, this.frameY - 10);
       context.fillText(label, x, this.frameY + this.boardPixels + 11);
+    }
+    if (this.wrapRows) {
+      for (let row = 0; row < this.size; row += 1) {
+        const y = this.pointY(row);
+        const label = String(this.size - row);
+        context.textAlign = "right";
+        context.fillText(label, this.frameX - 9, y);
+        context.textAlign = "left";
+        context.fillText(label, this.frameX + this.boardPixels + 9, y);
+      }
     }
     context.restore();
   }

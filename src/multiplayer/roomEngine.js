@@ -3,6 +3,8 @@ import {
   GoEngine,
   PHASE_PLAY,
   PHASE_SCORING,
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
   WHITE,
 } from "../game/goEngine.js";
 import { isRoomCode, isRoomRole } from "./protocol.js";
@@ -15,6 +17,7 @@ const SERIALIZED_SCHEMA_VERSION = 1;
 const TOKEN_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const VALID_COLORS = new Set([BLACK, WHITE]);
 const VALID_SCORING_RULES = new Set(["japanese", "chinese"]);
+const VALID_TOPOLOGIES = new Set([TOPOLOGY_CYLINDER, TOPOLOGY_TORUS]);
 
 const GAME_ERROR_MESSAGES = Object.freeze({
   game_not_playing: "当前阶段不能落子或停一手。",
@@ -105,6 +108,14 @@ function normalizeScoringRule(value) {
   return scoringRule;
 }
 
+function normalizeTopology(value) {
+  const topology = value ?? TOPOLOGY_CYLINDER;
+  if (!VALID_TOPOLOGIES.has(topology)) {
+    throw new RoomEngineError("棋盘形状无效。", 400, "BAD_REQUEST");
+  }
+  return topology;
+}
+
 function normalizeRole(value) {
   if (!isRoomRole(value)) {
     throw new RoomEngineError("房间身份无效。", 400, "BAD_REQUEST");
@@ -164,6 +175,9 @@ function restoreGame(value) {
       500,
       "BAD_ROOM_STATE",
     );
+  }
+  if (!Object.prototype.hasOwnProperty.call(snapshot, "topology")) {
+    snapshot.topology = TOPOLOGY_CYLINDER;
   }
 
   if (typeof GoEngine.fromState === "function") {
@@ -280,6 +294,7 @@ export class RoomEngine {
     size = 19,
     komi = 6.5,
     scoringRule = "japanese",
+    topology = TOPOLOGY_CYLINDER,
     playerId,
     tokenHash,
     now: nowInput,
@@ -295,6 +310,7 @@ export class RoomEngine {
       size: normalizeSize(size),
       komi: normalizeKomi(komi),
       scoringRule: normalizeScoringRule(scoringRule),
+      topology: normalizeTopology(topology),
     });
     const state = {
       schemaVersion: SERIALIZED_SCHEMA_VERSION,
@@ -652,6 +668,9 @@ export class RoomEngine {
         komi: normalizeKomi(payload.komi ?? this.game.komi),
         scoringRule: normalizeScoringRule(
           payload.scoringRule ?? this.game.scoringRule,
+        ),
+        topology: normalizeTopology(
+          payload.topology ?? this.game.topology ?? TOPOLOGY_CYLINDER,
         ),
       });
       this.state.moveCount = 0;

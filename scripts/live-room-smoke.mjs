@@ -49,7 +49,10 @@ try {
   );
   const created = await black.createRoom({
     name: "Smoke Black",
-    gameOptions: { size: 9, komi: 6.5, scoringRule: "japanese" },
+    size: 9,
+    komi: 6.5,
+    scoringRule: "japanese",
+    topology: "torus",
   });
   await blackConnected;
 
@@ -66,6 +69,14 @@ try {
 
   if (created.color !== "black" || joined.color !== "white") {
     throw new Error("Room seats were not assigned black then white");
+  }
+  if (
+    created.room?.game?.topology !== "torus" ||
+    joined.room?.game?.topology !== "torus"
+  ) {
+    throw new Error(
+      "Torus topology was not preserved across room creation and join",
+    );
   }
 
   const whiteSawBlackMove = waitFor(
@@ -94,6 +105,7 @@ try {
       black: created.color,
       white: joined.color,
       moveCount: finalState.room.game.moveCount,
+      topology: finalState.room.game.topology,
       synchronized: true,
     }),
   );

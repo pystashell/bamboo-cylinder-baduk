@@ -6,46 +6,47 @@
     <meta name="theme-color" content="#101715" />
     <meta
       name="description"
-      content="一个左右首尾相接、支持 KataGo 竹筒神经 AI、在线对局以及平面、弧面与完整竹筒视图的3D围棋。"
+      content="3D Baduk：支持竹筒与四边相连的环面棋盘、KataGo AI、在线对局以及平面和三维视图。"
     />
-    <title>竹筒围棋</title>
+    <title>3D Baduk · 奇异棋盘围棋</title>
   </head>
   <body>
     <div id="app">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="竹筒围棋首页">
+        <a class="brand" href="/" aria-label="3D Baduk 首页">
           <span class="brand-mark" aria-hidden="true">
             <span></span><span></span><span></span>
           </span>
           <span>
-            <strong>竹筒围棋</strong>
-            <small>Bamboo Cylinder Baduk</small>
+            <strong>3D Baduk</strong>
+            <small>奇异棋盘围棋</small>
           </span>
         </a>
-        <div class="topology-badge">
-          <span aria-hidden="true">↔</span>
-          左右首尾相接
+        <div class="topology-badge" aria-live="polite">
+          <span id="topology-badge-icon" aria-hidden="true">↔</span>
+          <strong id="topology-badge-text">竹筒 · 左右首尾相接</strong>
         </div>
       </header>
 
       <main class="game-layout">
-        <section class="board-stage" data-view-mode="arc" aria-label="竹筒围棋棋盘区域">
+        <section class="board-stage" data-view-mode="arc" data-topology="cylinder" aria-label="3D Baduk 棋盘区域">
           <div id="flat-scene" class="view-surface" aria-label="可横向滑动的竹筒表面平面展开棋盘" hidden></div>
           <div id="arc-scene" class="view-surface" aria-label="可横向循环滑动的3D弧面棋盘"></div>
           <div id="scene" class="view-surface" aria-label="可旋转的3D竹筒围棋棋盘" hidden></div>
+          <div id="torus-scene" class="view-surface" aria-label="可旋转的3D环面围棋棋盘" hidden></div>
 
           <div class="view-switch" role="group" aria-label="棋盘视图">
             <button type="button" data-view-mode="flat" aria-pressed="false">
               <span aria-hidden="true">▦</span>
               平面展开
             </button>
-            <button type="button" data-view-mode="arc" class="active" aria-pressed="true">
+            <button id="arc-view-button" type="button" data-view-mode="arc" class="active" aria-pressed="true">
               <span aria-hidden="true">◒</span>
               弧面模式
             </button>
             <button type="button" data-view-mode="3d" aria-pressed="false">
               <span aria-hidden="true">◉</span>
-              立体竹筒
+              <b id="three-d-view-label">立体竹筒</b>
             </button>
           </div>
 
@@ -189,6 +190,18 @@
             </div>
 
             <div class="field-group">
+              <span class="field-label">棋盘形状</span>
+              <div class="size-buttons topology-buttons" role="group" aria-label="棋盘形状选择">
+                <button type="button" data-board-topology="cylinder" class="active" aria-pressed="true">
+                  竹筒 · 左右连接
+                </button>
+                <button type="button" data-board-topology="torus" aria-pressed="false">
+                  环面 · 四边连接
+                </button>
+              </div>
+            </div>
+
+            <div class="field-group">
               <span class="field-label">快捷尺寸</span>
               <div class="size-buttons" role="group" aria-label="棋盘尺寸快捷选择">
                 <button type="button" data-board-size="9">9 × 9</button>
@@ -226,13 +239,21 @@
           </section>
 
           <details class="rules-note">
-            <summary>竹筒表面规则说明</summary>
-            <ul>
+            <summary id="rules-summary">竹筒表面规则说明</summary>
+            <ul id="cylinder-rules">
               <li>同一行最左与最右的棋点相邻。</li>
               <li>平面与弧面视图横向拖动只会改变展开起点，不会改变棋子在局面中的位置。</li>
               <li>弧面视图把完整一圈弯向玩家，左右边缘仍然相邻。</li>
               <li>上下两圈仍是棋盘边界，没有传统棋盘的四个角。</li>
               <li>禁自杀并采用位置超级劫，禁止重复任何旧局面。</li>
+              <li>双方连续停一手后进入点目，可先标记死子。</li>
+            </ul>
+            <ul id="torus-rules" hidden>
+              <li>同一行最左与最右相邻，同一列最上与最下也相邻。</li>
+              <li>每一个棋点都有四个方向，没有边、角和一线。</li>
+              <li>平面视图可向上下左右或斜向拖动，改变两个方向的展开起点。</li>
+              <li>立体视图是甜甜圈形环面；内圈格子会比外圈更密，这是三维嵌入造成的视觉形变。</li>
+              <li>禁自杀并采用位置超级劫，提子、连通与点目都跨越四条接缝计算。</li>
               <li>双方连续停一手后进入点目，可先标记死子。</li>
             </ul>
           </details>
@@ -243,7 +264,7 @@
     <dialog id="online-dialog" class="game-dialog online-dialog">
       <form id="online-form">
         <span class="eyebrow">在线对局</span>
-        <h2>邀请朋友加入竹筒棋局</h2>
+        <h2>邀请朋友加入 3D 棋局</h2>
         <p>创建房间后分享链接；第三位及之后加入的玩家会成为旁观者。</p>
 
         <label class="dialog-field" for="player-name">
@@ -277,7 +298,7 @@
       <form id="ai-form">
         <span class="eyebrow">本机 AI 对手</span>
         <h2>和 KataGo 下一盘</h2>
-        <p>KataGo b10 会在浏览器后台观察全盘，再按竹筒规则搜索落点。无需账号或第三方 API。</p>
+        <p>KataGo b10 会在浏览器后台观察全盘，再按当前棋盘的接缝规则搜索落点。无需账号或第三方 API。</p>
 
         <label class="dialog-field" for="ai-human-color">
           <span>你执哪一方</span>
@@ -299,7 +320,7 @@
       <form method="dialog">
         <span class="eyebrow">重新开始</span>
         <h2>建立一张新棋盘？</h2>
-        <p>当前对局进度将被清除，并使用面板中的尺寸和规则。</p>
+        <p>当前对局进度将被清除，并使用面板中的形状、尺寸和规则。</p>
         <div class="dialog-actions">
           <button value="cancel" class="secondary-button">取消</button>
           <button id="confirm-new-game" value="confirm" class="primary-button">开始新局</button>

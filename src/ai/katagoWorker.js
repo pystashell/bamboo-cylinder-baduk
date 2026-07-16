@@ -8,6 +8,7 @@ import {
   chooseMonteCarloMoveAsync,
   SearchCancelledError,
 } from "./mcts.js";
+import { TOPOLOGY_TORUS } from "../game/goEngine.js";
 import { attachKataGoWorkerRuntime } from "./katagoWorkerRuntime.js";
 import {
   buildCylinderFeatures,
@@ -91,7 +92,11 @@ async function neuralPolicy({ scope, id, state, signal, postStatus }) {
   const global = tf.tensor2d(features.global, [1, 19]);
   let output = null;
   try {
-    output = loaded.model.forwardPolicyValue(spatial, global);
+    output = loaded.model.forwardPolicyValue(
+      spatial,
+      global,
+      state.topology === TOPOLOGY_TORUS,
+    );
     const [policy, pass] = await Promise.all([
       output.policy.data(),
       output.policyPass.data(),

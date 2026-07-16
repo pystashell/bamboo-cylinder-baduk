@@ -141,6 +141,11 @@ summary:focus-visible {
   font-size: 17px;
 }
 
+.topology-badge strong {
+  font-size: inherit;
+  font-weight: 500;
+}
+
 .game-layout {
   height: calc(100vh - 74px);
   min-height: calc(100vh - 74px);
@@ -176,6 +181,10 @@ summary:focus-visible {
   touch-action: pan-y;
 }
 
+.board-stage[data-topology="torus"] #flat-scene {
+  touch-action: none;
+}
+
 #flat-scene.dragging {
   cursor: grabbing;
 }
@@ -186,6 +195,10 @@ summary:focus-visible {
 
 #arc-scene.dragging {
   cursor: grabbing;
+}
+
+#torus-scene {
+  cursor: grab;
 }
 
 .view-switch {
@@ -224,6 +237,10 @@ summary:focus-visible {
 
 .view-switch button span {
   margin-right: 5px;
+}
+
+.view-switch button b {
+  font: inherit;
 }
 
 .scene-toolbar {
@@ -657,6 +674,10 @@ select:disabled {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+}
+
+.topology-buttons {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .size-buttons button {

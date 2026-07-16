@@ -126,6 +126,7 @@ async function createRoom(request, env) {
           size: body.size,
           komi: body.komi,
           scoringRule: body.scoringRule,
+          topology: body.topology,
           playerId,
           tokenHash,
         }),

@@ -2,6 +2,7 @@ import {
   BLACK,
   GoEngine,
   PHASE_PLAY,
+  TOPOLOGY_TORUS,
   WHITE,
 } from "../game/goEngine.js";
 
@@ -326,7 +327,6 @@ function rawMoveAnalysis(game, groups, row, col, random) {
   const fragileResult = resultingLiberties.size <= 1;
   const selfAtari = capturedStones === 0 && fragileResult;
   const connections = Math.max(0, friendly.size - 1);
-  const edgeDistance = Math.min(row, game.size - 1 - row);
   const openingLine = Math.min(3, Math.max(1, Math.floor(game.size / 3)));
 
   let score = 0;
@@ -346,7 +346,13 @@ function rawMoveAnalysis(game, groups, row, col, random) {
   score += connections * 700;
   score += resultingLiberties.size * 24;
   score += friendly.size * 20 + enemy.size * 12;
-  score -= Math.abs(edgeDistance - openingLine) * 2;
+  // Cylinders retain meaningful first/second lines at the open row edges.
+  // Every torus point is middle-board, so applying that preference would
+  // invent a top and bottom edge that the rules do not have.
+  if (game.topology !== TOPOLOGY_TORUS) {
+    const edgeDistance = Math.min(row, game.size - 1 - row);
+    score -= Math.abs(edgeDistance - openingLine) * 2;
+  }
 
   // Connecting multiple endangered strings through their shared liberty is a
   // forcing rescue, including the visually easy-to-miss cylinder seam case.

@@ -8,10 +8,13 @@ import {
   PHASE_PLAY,
   PHASE_SCORING,
   SCORING_CHINESE,
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
 } from "./game/goEngine.js";
 import { CylinderBoard } from "./view/CylinderBoard.js";
 import { FlatBoard } from "./view/FlatBoard.js";
 import { ArcBoard } from "./view/ArcBoard.js";
+import { TorusBoard } from "./view/TorusBoard.js";
 import { RoomClient, CONNECTION_STATUS } from "./multiplayer/roomClient.js";
 import { sanitizeRoomCode } from "./multiplayer/protocol.js";
 import { roomRevisionHasCaughtUp } from "./multiplayer/commandSync.js";
@@ -21,8 +24,11 @@ const $ = (selector) => document.querySelector(selector);
 const elements = {
   boardStage: $(".board-stage"),
   scene: $("#scene"),
+  torusScene: $("#torus-scene"),
   flatScene: $("#flat-scene"),
   arcScene: $("#arc-scene"),
+  topologyBadgeIcon: $("#topology-badge-icon"),
+  topologyBadgeText: $("#topology-badge-text"),
   phaseLabel: $("#phase-label"),
   turnStone: $("#turn-stone"),
   turnText: $("#turn-text"),
@@ -44,6 +50,7 @@ const elements = {
   scoringRule: $("#scoring-rule"),
   komi: $("#komi"),
   sizeButtons: [...document.querySelectorAll("[data-board-size]")],
+  topologyButtons: [...document.querySelectorAll("[data-board-topology]")],
   resetView: $("#reset-view"),
   toggleRotation: $("#toggle-rotation"),
   resetViewIcon: $("#reset-view-icon"),
@@ -51,6 +58,11 @@ const elements = {
   gesturePrimary: $("#gesture-primary"),
   gestureSecondary: $("#gesture-secondary"),
   viewButtons: [...document.querySelectorAll("[data-view-mode]")],
+  arcViewButton: $("#arc-view-button"),
+  threeDViewLabel: $("#three-d-view-label"),
+  rulesSummary: $("#rules-summary"),
+  cylinderRules: $("#cylinder-rules"),
+  torusRules: $("#torus-rules"),
   coordinateHint: $("#coordinate-hint"),
   newGameDialog: $("#new-game-dialog"),
   roomPanel: $("#room-panel"),
@@ -104,12 +116,14 @@ const ERROR_MESSAGES = {
 const COORDINATE_LETTERS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
 let game;
 let cylinderView;
+let torusView;
 let flatView;
 let arcView;
 let activeViewMode = "arc";
 const autoRotateByView = { arc: false, "3d": false };
 let moveCount = 0;
 let pendingSize = 19;
+let pendingTopology = TOPOLOGY_CYLINDER;
 let lastPlayedPoint = null;
 let onlineRoom = null;
 let onlineBusy = false;
@@ -135,6 +149,18 @@ const KATAGO_AI = Object.freeze({
 
 function colorName(color) {
   return color === BLACK ? "黑方" : "白方";
+}
+
+function isTorusTopology(topology = game?.topology) {
+  return topology === TOPOLOGY_TORUS;
+}
+
+function topologyName(topology = game?.topology) {
+  return isTorusTopology(topology) ? "环面" : "竹筒";
+}
+
+function topologySurfaceName(topology = game?.topology) {
+  return isTorusTopology(topology) ? "环面" : "筒面";
 }
 
 function formatScore(value) {
@@ -164,7 +190,7 @@ function isAIMode() {
 }
 
 function currentAIName() {
-  return "KataGo 竹筒混合 AI";
+  return `KataGo ${topologyName()}混合 AI`;
 }
 
 function aiColor() {
@@ -257,7 +283,7 @@ function handleAIWorkerMessage(event) {
     } else if (message.stage === "neural_inference") {
       setMessage(`KataGo 正在观察整盘棋 · ${message.backend ?? "浏览器"} 推理…`);
     } else if (message.stage === "searching") {
-      setMessage("神经判断完成，正在按竹筒规则验证与搜索…");
+      setMessage(`神经判断完成，正在按${topologyName()}规则验证与搜索…`);
     }
     return;
   }
@@ -429,6 +455,7 @@ function canShowMovePreview() {
 function syncMovePreviewAvailability() {
   const enabled = canShowMovePreview();
   cylinderView?.setMovePreviewEnabled(enabled);
+  torusView?.setMovePreviewEnabled(enabled);
   flatView?.setMovePreviewEnabled(enabled);
   arcView?.setMovePreviewEnabled(enabled);
 }
@@ -436,6 +463,7 @@ function syncMovePreviewAvailability() {
 function hydratePublicGame(state) {
   const hydrated = new GoEngine({
     size: state.size,
+    topology: state.topology ?? TOPOLOGY_CYLINDER,
     komi: state.komi,
     scoringRule: state.scoringRule,
     initialBoard: state.board,
@@ -666,6 +694,9 @@ function updateRoomUI() {
   elements.scoringRule.disabled = !canChangeOnlineSettings;
   elements.komi.disabled = !canChangeOnlineSettings;
   for (const button of elements.sizeButtons) button.disabled = !canChangeOnlineSettings;
+  for (const button of elements.topologyButtons) {
+    button.disabled = !canChangeOnlineSettings;
+  }
   syncMovePreviewAvailability();
 }
 
@@ -682,21 +713,56 @@ function rememberOfflineGame() {
   };
 }
 
+function syncTopologyPresentation() {
+  const torus = isTorusTopology();
+  elements.boardStage.dataset.topology = game.topology;
+  elements.boardStage.setAttribute(
+    "aria-label",
+    torus ? "四边相连的环面围棋棋盘区域" : "左右相连的竹筒围棋棋盘区域",
+  );
+  elements.flatScene.setAttribute(
+    "aria-label",
+    torus
+      ? "可向任意方向循环滑动的环面平面展开棋盘"
+      : "可横向滑动的竹筒表面平面展开棋盘",
+  );
+  elements.topologyBadgeIcon.textContent = torus ? "↔↕" : "↔";
+  elements.topologyBadgeText.textContent = torus
+    ? "环面 · 上下左右首尾相接"
+    : "竹筒 · 左右首尾相接";
+  elements.arcViewButton.hidden = torus;
+  elements.threeDViewLabel.textContent = torus ? "立体环面" : "立体竹筒";
+  elements.rulesSummary.textContent = torus
+    ? "四边相连的环面规则说明"
+    : "竹筒表面规则说明";
+  elements.cylinderRules.hidden = torus;
+  elements.torusRules.hidden = !torus;
+  setViewMode(torus && activeViewMode === "arc" ? "flat" : activeViewMode);
+}
+
+function rebuildViews(size, topology) {
+  cylinderView?.rebuild(size);
+  torusView?.rebuild(size);
+  flatView?.rebuild(size, topology);
+  arcView?.rebuild(size);
+  syncTopologyPresentation();
+}
+
 function restoreOfflineGame() {
   if (!offlineGameState) return;
   cancelAIThinking();
   const previousSize = game?.size;
+  const previousTopology = game?.topology;
   game = GoEngine.fromState(offlineGameState.game);
   moveCount = offlineGameState.moveCount;
   lastPlayedPoint = offlineGameState.lastPlayedPoint;
   aiActive = Boolean(offlineGameState.ai?.active);
   aiHumanColor = offlineGameState.ai?.humanColor === WHITE ? WHITE : BLACK;
-  if (previousSize !== game.size) {
-    cylinderView?.rebuild(game.size);
-    flatView?.rebuild(game.size);
-    arcView?.rebuild(game.size);
+  if (previousSize !== game.size || previousTopology !== game.topology) {
+    rebuildViews(game.size, game.topology);
   }
   setPendingSize(game.size);
+  setPendingTopology(game.topology);
   elements.scoringRule.value = game.scoringRule;
   elements.komi.value = String(game.komi);
   offlineGameState = null;
@@ -715,6 +781,7 @@ function announceRoomState(room, previousRoom) {
   const gameChanged = !previousRoom || [
     previousRoom.moveCount !== room.moveCount,
     previousRoom.game.size !== room.game.size,
+    previousRoom.game.topology !== room.game.topology,
     previousRoom.game.komi !== room.game.komi,
     previousRoom.game.scoringRule !== room.game.scoringRule,
     previousRoom.game.phase !== room.game.phase,
@@ -756,7 +823,9 @@ function announceRoomState(room, previousRoom) {
       setMessage(`${colorName(lastMove.color)}停一手。`);
     }
   } else if (room.moveCount === 0) {
-    setMessage(`${room.game.size} 路在线棋盘已准备好，黑方先行。`);
+    setMessage(
+      `${room.game.size} 路${topologySurfaceName(room.game.topology)}在线棋盘已准备好，黑方先行。`,
+    );
   }
 }
 
@@ -773,6 +842,7 @@ function applyOnlineRoom(room) {
 
   const previousRoom = onlineRoom;
   const previousSize = game?.size;
+  const previousTopology = game?.topology;
   onlineRoom = room;
   if (
     onlineCommandPending &&
@@ -788,12 +858,11 @@ function applyOnlineRoom(room) {
     ? { row: game.lastMove.row, col: game.lastMove.col }
     : null;
 
-  if (previousSize !== game.size) {
-    cylinderView?.rebuild(game.size);
-    flatView?.rebuild(game.size);
-    arcView?.rebuild(game.size);
+  if (previousSize !== game.size || previousTopology !== game.topology) {
+    rebuildViews(game.size, game.topology);
   }
   setPendingSize(game.size);
+  setPendingTopology(game.topology);
   elements.scoringRule.value = game.scoringRule;
   elements.komi.value = String(game.komi);
   announceRoomState(room, previousRoom);
@@ -847,11 +916,23 @@ function setPendingSize(size) {
   }
 }
 
+function setPendingTopology(topology) {
+  pendingTopology = topology === TOPOLOGY_TORUS
+    ? TOPOLOGY_TORUS
+    : TOPOLOGY_CYLINDER;
+  for (const button of elements.topologyButtons) {
+    const active = button.dataset.boardTopology === pendingTopology;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
 function getNewGameOptions() {
   const size = Math.max(5, Math.min(25, Math.round(Number(elements.customSize.value) || 19)));
   setPendingSize(size);
   return {
     size,
+    topology: pendingTopology,
     scoringRule: elements.scoringRule.value,
     komi: Number(elements.komi.value) || 0,
   };
@@ -873,10 +954,10 @@ async function startNewGame() {
   moveCount = 0;
   lastPlayedPoint = null;
   elements.coordinateHint.textContent = "";
-  cylinderView?.rebuild(options.size);
-  flatView?.rebuild(options.size);
-  arcView?.rebuild(options.size);
-  setMessage(`${options.size} 路筒面棋盘已准备好，黑方先行。`);
+  rebuildViews(options.size, options.topology);
+  setMessage(
+    `${options.size} 路${topologySurfaceName(options.topology)}棋盘已准备好，黑方先行。`,
+  );
   updateUI();
   maybeStartAITurn();
 }
@@ -921,12 +1002,14 @@ function updateUI() {
     : state.lastMove;
   const viewState = { ...state, lastMove: renderLastMove };
   cylinderView?.setPosition(viewState);
+  torusView?.setPosition(viewState);
   flatView?.setPosition(viewState);
   arcView?.setPosition(viewState);
 
   elements.blackCaptures.textContent = String(state.captures.black);
   elements.whiteCaptures.textContent = String(state.captures.white);
-  elements.boardTopology.textContent = `${state.size} 路 · ${state.size * state.size} 点 · 筒面`;
+  elements.boardTopology.textContent =
+    `${state.size} 路 · ${state.size * state.size} 点 · ${topologySurfaceName(state.topology)}`;
   elements.moveNumber.textContent = `第 ${moveCount + 1} 手`;
   elements.turnStone.classList.toggle("black", state.currentPlayer === BLACK);
   elements.turnStone.classList.toggle("white", state.currentPlayer === WHITE);
@@ -968,7 +1051,7 @@ function updateUI() {
   } else {
     elements.phaseLabel.textContent = "对局结束";
     elements.turnText.textContent = formatResult(score);
-    elements.moveNumber.textContent = `${state.size} 路筒面`;
+    elements.moveNumber.textContent = `${state.size} 路${topologySurfaceName(state.topology)}`;
   }
 }
 
@@ -1047,8 +1130,18 @@ function handleHover(point) {
   }
   const letter = COORDINATE_LETTERS[point.col] || String(point.col + 1);
   const coordinate = `${letter}${game.size - point.row}`;
-  const seamNote = point.col === 0 || point.col === game.size - 1 ? " · A列与末列相邻" : "";
-  elements.coordinateHint.textContent = `${coordinate}${seamNote}`;
+  const seamNotes = [];
+  if (point.col === 0 || point.col === game.size - 1) {
+    seamNotes.push("A列与末列相邻");
+  }
+  if (
+    isTorusTopology() &&
+    (point.row === 0 || point.row === game.size - 1)
+  ) {
+    seamNotes.push("最上行与最下行相邻");
+  }
+  elements.coordinateHint.textContent =
+    `${coordinate}${seamNotes.length ? ` · ${seamNotes.join(" · ")}` : ""}`;
 }
 
 elements.passButton.addEventListener("click", () => {
@@ -1109,6 +1202,13 @@ for (const button of elements.sizeButtons) {
   });
 }
 
+for (const button of elements.topologyButtons) {
+  button.addEventListener("click", () => {
+    setPendingTopology(button.dataset.boardTopology);
+    requestNewGame();
+  });
+}
+
 elements.customSize.addEventListener("change", () => {
   const raw = Number(elements.customSize.value);
   setPendingSize(Number.isFinite(raw) ? raw : 19);
@@ -1125,21 +1225,38 @@ elements.customSize.addEventListener("keydown", (event) => {
 
 elements.newGameDialog.addEventListener("close", () => {
   if (elements.newGameDialog.returnValue === "confirm") void startNewGame();
-  else setPendingSize(game.size);
+  else {
+    setPendingSize(game.size);
+    setPendingTopology(game.topology);
+  }
 });
 
 function setViewMode(mode) {
-  activeViewMode = ["flat", "arc", "3d"].includes(mode) ? mode : "arc";
+  const torus = isTorusTopology();
+  const availableModes = torus ? ["flat", "3d"] : ["flat", "arc", "3d"];
+  activeViewMode = availableModes.includes(mode)
+    ? mode
+    : torus
+      ? "flat"
+      : "arc";
   const flatActive = activeViewMode === "flat";
-  const arcActive = activeViewMode === "arc";
-  const cylinderActive = activeViewMode === "3d";
+  const arcActive = !torus && activeViewMode === "arc";
+  const cylinderActive = !torus && activeViewMode === "3d";
+  const torusActive = torus && activeViewMode === "3d";
   elements.boardStage.dataset.viewMode = activeViewMode;
   elements.flatScene.hidden = !flatActive;
   elements.arcScene.hidden = !arcActive;
   elements.scene.hidden = !cylinderActive;
+  elements.torusScene.hidden = !torusActive;
   flatView?.setActive(flatActive);
   arcView?.setActive(arcActive);
   cylinderView?.setActive(cylinderActive);
+  torusView?.setActive(torusActive);
+  if (arcActive) arcView?.setAutoRotate(autoRotateByView.arc);
+  if (cylinderActive) {
+    cylinderView?.setAutoRotate(autoRotateByView["3d"]);
+  }
+  if (torusActive) torusView?.setAutoRotate(autoRotateByView["3d"]);
 
   for (const button of elements.viewButtons) {
     const active = button.dataset.viewMode === activeViewMode;
@@ -1147,26 +1264,35 @@ function setViewMode(mode) {
     button.setAttribute("aria-pressed", String(active));
   }
 
-  const viewCopy = {
-    flat: {
-      resetIcon: "↤",
-      resetLabel: "重置展开",
-      primaryGesture: "横向拖动",
-      secondaryGesture: "改变展开起点",
-    },
-    arc: {
-      resetIcon: "↤",
-      resetLabel: "重置弧面",
-      primaryGesture: "横向拖动",
-      secondaryGesture: "弧面循环 · 滚轮缩放",
-    },
-    "3d": {
-      resetIcon: "◎",
-      resetLabel: "回正视角",
-      primaryGesture: "拖动旋转",
-      secondaryGesture: "滚轮缩放",
-    },
-  }[activeViewMode];
+  const viewCopy = activeViewMode === "flat"
+    ? torus
+      ? {
+          resetIcon: "↤",
+          resetLabel: "重置展开",
+          primaryGesture: "任意方向拖动",
+          secondaryGesture: "上下左右循环 · 支持斜向",
+        }
+      : {
+          resetIcon: "↤",
+          resetLabel: "重置展开",
+          primaryGesture: "横向拖动",
+          secondaryGesture: "改变展开起点",
+        }
+    : activeViewMode === "arc"
+      ? {
+          resetIcon: "↤",
+          resetLabel: "重置弧面",
+          primaryGesture: "横向拖动",
+          secondaryGesture: "弧面循环 · 滚轮缩放",
+        }
+      : {
+          resetIcon: "◎",
+          resetLabel: torus ? "回正环面" : "回正视角",
+          primaryGesture: "拖动旋转",
+          secondaryGesture: torus
+            ? "观察内圈与背面 · 滚轮缩放"
+            : "滚轮缩放",
+        };
 
   elements.toggleRotation.hidden = flatActive;
   elements.toggleRotation.setAttribute(
@@ -1188,6 +1314,7 @@ for (const button of elements.viewButtons) {
 elements.resetView.addEventListener("click", () => {
   if (activeViewMode === "flat") flatView.resetView();
   else if (activeViewMode === "arc") arcView.resetView();
+  else if (isTorusTopology()) torusView.resetView();
   else cylinderView.resetView();
 });
 elements.toggleRotation.addEventListener("click", () => {
@@ -1196,6 +1323,7 @@ elements.toggleRotation.addEventListener("click", () => {
   autoRotateByView[activeViewMode] = active;
   elements.toggleRotation.setAttribute("aria-pressed", String(active));
   if (activeViewMode === "arc") arcView.setAutoRotate(active);
+  else if (isTorusTopology()) torusView.setAutoRotate(active);
   else cylinderView.setAutoRotate(active);
 });
 
@@ -1397,14 +1525,26 @@ roomClient.on("error", (error) => {
 });
 
 setPendingSize(19);
-game = new GoEngine({ size: 19, komi: 7.5, scoringRule: SCORING_CHINESE });
+setPendingTopology(TOPOLOGY_CYLINDER);
+game = new GoEngine({
+  size: 19,
+  topology: TOPOLOGY_CYLINDER,
+  komi: 7.5,
+  scoringRule: SCORING_CHINESE,
+});
 cylinderView = new CylinderBoard(elements.scene, {
+  size: game.size,
+  onPoint: handleBoardPoint,
+  onHover: handleHover,
+});
+torusView = new TorusBoard(elements.torusScene, {
   size: game.size,
   onPoint: handleBoardPoint,
   onHover: handleHover,
 });
 flatView = new FlatBoard(elements.flatScene, {
   size: game.size,
+  topology: game.topology,
   onPoint: handleBoardPoint,
   onHover: handleHover,
 });
@@ -1413,6 +1553,7 @@ arcView = new ArcBoard(elements.arcScene, {
   onPoint: handleBoardPoint,
   onHover: handleHover,
 });
+syncTopologyPresentation();
 setViewMode("arc");
 updateUI();
 rememberOfflineGame();
@@ -1436,6 +1577,7 @@ window.addEventListener(
   () => {
     cancelAIThinking();
     cylinderView.destroy();
+    torusView.destroy();
     flatView.destroy();
     arcView.destroy();
     roomClient.destroy();

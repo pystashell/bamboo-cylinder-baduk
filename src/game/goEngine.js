@@ -1,8 +1,9 @@
 /**
- * Pure Go rules for a cylindrical board.
+ * Pure Go rules for periodically connected boards.
  *
- * Rows retain their normal top/bottom boundaries. Columns are periodic, so
- * column 0 is adjacent to column size - 1. Stones are placed on intersections.
+ * Cylinders retain their normal top/bottom boundaries while columns are
+ * periodic. Tori make both rows and columns periodic. Stones are placed on
+ * intersections.
  */
 
 export const EMPTY = null;
@@ -16,6 +17,9 @@ export const PHASE_FINISHED = "finished";
 export const SCORING_JAPANESE = "japanese";
 export const SCORING_CHINESE = "chinese";
 
+export const TOPOLOGY_CYLINDER = "cylinder";
+export const TOPOLOGY_TORUS = "torus";
+
 export const MOVE_ERRORS = Object.freeze({
   GAME_NOT_PLAYING: "game_not_playing",
   OUT_OF_BOUNDS: "out_of_bounds",
@@ -28,6 +32,7 @@ export const MOVE_ERRORS = Object.freeze({
 
 const VALID_COLORS = new Set([BLACK, WHITE]);
 const VALID_PHASES = new Set([PHASE_PLAY, PHASE_SCORING, PHASE_FINISHED]);
+const VALID_TOPOLOGIES = new Set([TOPOLOGY_CYLINDER, TOPOLOGY_TORUS]);
 
 export function oppositeColor(color) {
   return color === BLACK ? WHITE : BLACK;
@@ -58,6 +63,13 @@ function normalizeScoringRule(rule) {
     return SCORING_CHINESE;
   }
   throw new TypeError(`Unknown scoring rule: ${rule}`);
+}
+
+function normalizeTopology(topology) {
+  if (!VALID_TOPOLOGIES.has(topology)) {
+    throw new TypeError(`Unknown board topology: ${topology}`);
+  }
+  return topology;
 }
 
 function requirePlainObject(value, label) {
@@ -216,6 +228,7 @@ export class GoEngine {
    *   the intended presets, but any integer >= 3 is supported).
    * @param {number} [options.komi=6.5]
    * @param {'japanese'|'chinese'} [options.scoringRule='japanese']
+   * @param {'cylinder'|'torus'} [options.topology='cylinder']
    * @param {Array<Array<'black'|'white'|null>>} [options.initialBoard]
    * @param {'black'|'white'} [options.currentPlayer='black']
    */
@@ -223,6 +236,7 @@ export class GoEngine {
     size = 19,
     komi = 6.5,
     scoringRule = SCORING_JAPANESE,
+    topology = TOPOLOGY_CYLINDER,
     initialBoard = null,
     currentPlayer = BLACK,
   } = {}) {
@@ -239,6 +253,7 @@ export class GoEngine {
     this.size = size;
     this.komi = komi;
     this.scoringRule = normalizeScoringRule(scoringRule);
+    this.topology = normalizeTopology(topology);
     this.board = initialBoard
       ? this.#validateAndCopyBoard(initialBoard)
       : makeEmptyBoard(size);
@@ -292,6 +307,8 @@ export class GoEngine {
       size: snapshot.size,
       komi: snapshot.komi,
       scoringRule: snapshot.scoringRule,
+      // States exported before multiple topologies existed were cylindrical.
+      topology: snapshot.topology ?? TOPOLOGY_CYLINDER,
       initialBoard: snapshot.board,
       currentPlayer: snapshot.currentPlayer,
     });
@@ -446,8 +463,8 @@ export class GoEngine {
   }
 
   /**
-   * Orthogonal neighbours. Horizontal neighbours wrap across the cylinder
-   * seam; vertical neighbours stop at the top and bottom rows.
+   * Orthogonal neighbours. Columns always wrap. Rows wrap on a torus and stop
+   * at the top and bottom on a cylinder.
    *
    * @returns {Point[]}
    */
@@ -458,8 +475,15 @@ export class GoEngine {
       { row, col: (col - 1 + this.size) % this.size },
       { row, col: (col + 1) % this.size },
     ];
-    if (row > 0) candidates.push({ row: row - 1, col });
-    if (row < this.size - 1) candidates.push({ row: row + 1, col });
+    if (this.topology === TOPOLOGY_TORUS) {
+      candidates.push(
+        { row: (row - 1 + this.size) % this.size, col },
+        { row: (row + 1) % this.size, col },
+      );
+    } else {
+      if (row > 0) candidates.push({ row: row - 1, col });
+      if (row < this.size - 1) candidates.push({ row: row + 1, col });
+    }
 
     // The minimum board size is three, but keeping this deduplication makes the
     // topology explicit and prevents future small-board variants double-counting.
@@ -801,6 +825,7 @@ export class GoEngine {
       size: this.size,
       komi: this.komi,
       scoringRule: this.scoringRule,
+      topology: this.topology,
       board: this.getBoard(),
       currentPlayer: this.currentPlayer,
       phase: this.phase,

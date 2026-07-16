@@ -10,6 +10,8 @@ import {
   PHASE_SCORING,
   SCORING_CHINESE,
   SCORING_JAPANESE,
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
   WHITE,
 } from "../src/game/goEngine.js";
 
@@ -38,6 +40,126 @@ test("9x9, 13x13 and 19x19 boards wrap columns but retain row boundaries", () =>
     assert.equal(game.neighbors(0, 0).length, 3);
     assert.equal(game.neighbors(size - 1, size - 1).length, 3);
   }
+});
+
+test("torus boards give every point four neighbours across both seams", () => {
+  for (const size of [9, 13, 19]) {
+    const game = new GoEngine({ size, topology: TOPOLOGY_TORUS });
+    const expectedCorner = new Set([
+      `0,${size - 1}`,
+      "0,1",
+      `${size - 1},0`,
+      "1,0",
+    ]);
+
+    assert.deepEqual(
+      new Set(game.neighbors(0, 0).map(({ row, col }) => `${row},${col}`)),
+      expectedCorner,
+    );
+    for (let row = 0; row < size; row += 1) {
+      for (let col = 0; col < size; col += 1) {
+        assert.equal(game.neighbors(row, col).length, 4);
+      }
+    }
+  }
+});
+
+test("a torus move captures an opponent through the top-bottom seam", () => {
+  const game = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_TORUS,
+    currentPlayer: BLACK,
+    initialBoard: boardFromRows([
+      ".BWB.",
+      "..B..",
+      ".....",
+      "..W..",
+      ".W.W.",
+    ]),
+  });
+
+  const result = game.play(4, 2);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.captured, [{ row: 0, col: 2 }]);
+  assert.equal(game.get(0, 2), EMPTY);
+  assert.equal(game.get(4, 2), BLACK);
+});
+
+test("torus suicide checks all four neighbours across the top-bottom seam", () => {
+  const initialBoard = boardFromRows([
+    ".W.W.",
+    "..W..",
+    ".....",
+    ".....",
+    "..W..",
+  ]);
+  const game = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_TORUS,
+    currentPlayer: BLACK,
+    initialBoard,
+  });
+
+  assert.deepEqual(game.play(0, 2), {
+    ok: false,
+    reason: MOVE_ERRORS.SUICIDE,
+  });
+  assert.deepEqual(game.getBoard(), initialBoard);
+});
+
+test("torus groups and territory regions connect through the top-bottom seam", () => {
+  const connected = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_TORUS,
+    initialBoard: boardFromRows([
+      "..B..",
+      ".....",
+      ".....",
+      ".....",
+      "..B..",
+    ]),
+  });
+  assert.deepEqual(
+    new Set(
+      connected
+        .getGroup(0, 2)
+        .stones.map(({ row, col }) => `${row},${col}`),
+    ),
+    new Set(["0,2", "4,2"]),
+  );
+
+  const scoring = new GoEngine({
+    size: 5,
+    komi: 0,
+    topology: TOPOLOGY_TORUS,
+    initialBoard: boardFromRows([
+      "BB.BB",
+      "BBBBB",
+      "BBBBB",
+      "BBBBB",
+      "BB.BB",
+    ]),
+  }).score(SCORING_CHINESE);
+  assert.equal(scoring.territory[BLACK], 2);
+  assert.equal(scoring.regions.length, 1);
+  assert.deepEqual(
+    new Set(scoring.regions[0].points.map(({ row, col }) => `${row},${col}`)),
+    new Set(["0,2", "4,2"]),
+  );
+});
+
+test("topology round-trips while legacy states default to a cylinder", () => {
+  const torus = new GoEngine({ size: 5, topology: TOPOLOGY_TORUS });
+  const restored = GoEngine.fromState(torus.exportState());
+  assert.equal(restored.topology, TOPOLOGY_TORUS);
+  assert.deepEqual(restored.exportState(), torus.exportState());
+
+  const legacyState = torus.exportState();
+  delete legacyState.topology;
+  const legacy = GoEngine.fromState(legacyState);
+  assert.equal(legacy.topology, TOPOLOGY_CYLINDER);
+  assert.equal(legacy.neighbors(0, 0).length, 3);
 });
 
 test("a move captures an opponent through the cylindrical seam", () => {

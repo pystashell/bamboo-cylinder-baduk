@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { chooseMonteCarloMove } from "../src/ai/mcts.js";
-import { BLACK, EMPTY, GoEngine, WHITE } from "../src/game/goEngine.js";
+import {
+  BLACK,
+  EMPTY,
+  GoEngine,
+  TOPOLOGY_TORUS,
+  WHITE,
+} from "../src/game/goEngine.js";
 
 // These include seeds that made the old all-legal-moves MCTS choose a
 // self-atari or fill its own eye, keeping the regressions meaningful.
@@ -66,6 +72,27 @@ test("small-budget AI always takes a forced capture across the seam", () => {
       ]),
     "2,4",
     "black must capture the white stone whose final liberty wraps to column 4",
+  );
+});
+
+test("small-budget AI takes a forced capture across the torus row seam", () => {
+  assertMoveAcrossSeeds(
+    () =>
+      new GoEngine({
+        size: 5,
+        komi: 0,
+        topology: TOPOLOGY_TORUS,
+        currentPlayer: BLACK,
+        initialBoard: boardFromRows([
+          ".BWB.",
+          "..B..",
+          ".....",
+          ".....",
+          ".....",
+        ]),
+      }),
+    "4,2",
+    "black must capture the white stone whose final liberty wraps to row 4",
   );
 });
 

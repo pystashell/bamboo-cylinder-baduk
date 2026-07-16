@@ -194,6 +194,51 @@ test("serializes the game, memberships and command receipts", () => {
   );
 });
 
+test("creates, serializes and restores a torus room", () => {
+  const room = RoomEngine.create({
+    code: "TRS234",
+    name: "环面黑方",
+    size: 9,
+    komi: 6.5,
+    scoringRule: "japanese",
+    topology: "torus",
+    playerId: "torus-black",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+
+  assert.equal(room.snapshot(1_001).game.topology, "torus");
+  const serialized = room.serialize();
+  assert.equal(serialized.game.topology, "torus");
+  assert.equal(
+    RoomEngine.restore(serialized).snapshot(1_002).game.topology,
+    "torus",
+  );
+});
+
+test("defaults legacy persisted games without topology to cylinder", () => {
+  const legacyState = createRoom().serialize();
+  delete legacyState.game.topology;
+
+  const restored = RoomEngine.restore(legacyState);
+  assert.equal(restored.snapshot(1_001).game.topology, "cylinder");
+});
+
+test("validates topology when creating a room", () => {
+  assert.throws(
+    () =>
+      RoomEngine.create({
+        code: "BAD234",
+        name: "黑方",
+        topology: "sphere",
+        playerId: "black-player",
+        tokenHash: BLACK_HASH,
+        now: 1_000,
+      }),
+    (error) => error instanceof RoomEngineError && error.code === "BAD_REQUEST",
+  );
+});
+
 test("supports pass, scoring controls, resume and a black-controlled new game", () => {
   const room = createRoom();
   joinWhite(room);
@@ -234,6 +279,39 @@ test("supports pass, scoring controls, resume and a black-controlled new game", 
   assert.equal(fresh.room.game.komi, 7.5);
   assert.equal(fresh.room.game.scoringRule, "chinese");
   assert.equal(fresh.room.moveCount, 0);
+});
+
+test("lets the host switch topology for a new game and rejects invalid topology", () => {
+  const room = createRoom();
+  joinWhite(room);
+
+  const torus = room.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: { topology: "torus" },
+    now: 3_000,
+  });
+  assert.equal(torus.room.game.topology, "torus");
+
+  const preserved = room.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: { size: 13 },
+    now: 3_100,
+  });
+  assert.equal(preserved.room.game.topology, "torus");
+
+  assert.throws(
+    () =>
+      room.applyAction({
+        playerId: "black-player",
+        action: "new_game",
+        payload: { topology: "sphere" },
+        now: 3_200,
+      }),
+    (error) => error instanceof RoomEngineError && error.code === "BAD_REQUEST",
+  );
+  assert.equal(room.snapshot(3_201).game.topology, "torus");
 });
 
 test("requires both colors to confirm before finishing scoring", () => {

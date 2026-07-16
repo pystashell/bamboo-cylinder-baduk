@@ -8,7 +8,14 @@ import {
   KATAGO_SPATIAL_CHANNELS,
   policyPriorsFromLogits,
 } from "../src/ai/katago/cylinderFeatures.js";
-import { BLACK, EMPTY, GoEngine, WHITE } from "../src/game/goEngine.js";
+import {
+  BLACK,
+  EMPTY,
+  GoEngine,
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
+  WHITE,
+} from "../src/game/goEngine.js";
 
 function boardFromRows(rows) {
   return rows.map((row) =>
@@ -101,6 +108,45 @@ test("KataGo policy masks occupied and cylindrical-suicide logits before softmax
   assert.equal(priors.indexOf(Math.max(...priors)), 4);
   assert.ok(Math.abs(priors.reduce((sum, value) => sum + value, 0) - 1) < 1e-6);
   assert.deepEqual(game.exportState(), before, "legality probes must be immutable");
+});
+
+test("KataGo legal mask uses the torus top-bottom capture seam", () => {
+  const board = boardFromRows([
+    ".BWB.",
+    "..B..",
+    ".....",
+    "..W..",
+    ".W.W.",
+  ]);
+  const torus = new GoEngine({
+    size: 5,
+    komi: 0,
+    topology: TOPOLOGY_TORUS,
+    currentPlayer: BLACK,
+    initialBoard: board,
+  });
+  const cylinder = new GoEngine({
+    size: 5,
+    komi: 0,
+    topology: TOPOLOGY_CYLINDER,
+    currentPlayer: BLACK,
+    initialBoard: board,
+  });
+  const moveIndex = 4 * 5 + 2;
+
+  assert.equal(
+    buildLegalPolicyMask(torus)[moveIndex],
+    1,
+    "capturing row 0 through the torus seam makes the surrounded move legal",
+  );
+  assert.equal(
+    buildLegalPolicyMask(cylinder)[moveIndex],
+    0,
+    "the same bottom-edge move is suicide when rows do not wrap",
+  );
+  const played = torus.play(4, 2);
+  assert.equal(played.ok, true);
+  assert.deepEqual(played.captured, [{ row: 0, col: 2 }]);
 });
 
 test("KataGo policy mask honors restored positional-superko history", () => {
