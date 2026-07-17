@@ -22,10 +22,17 @@
             <small>奇异棋盘围棋</small>
           </span>
         </a>
-        <div class="topology-badge" aria-live="polite">
+        <button
+          id="topology-quick-toggle"
+          class="topology-badge"
+          type="button"
+          aria-label="切换为四边连接棋盘"
+          aria-live="polite"
+        >
           <span id="topology-badge-icon" aria-hidden="true">↔</span>
-          <strong id="topology-badge-text">竹筒 · 左右首尾相接</strong>
-        </div>
+          <strong id="topology-badge-text">竹筒</strong>
+          <small id="topology-badge-action">选四边连接</small>
+        </button>
       </header>
 
       <main class="game-layout">
@@ -320,7 +327,7 @@
       <form method="dialog">
         <span class="eyebrow">重新开始</span>
         <h2>建立一张新棋盘？</h2>
-        <p>当前对局进度将被清除，并使用面板中的形状、尺寸和规则。</p>
+        <p id="new-game-summary">当前对局进度将被清除，并使用面板中的形状、尺寸和规则。</p>
         <div class="dialog-actions">
           <button value="cancel" class="secondary-button">取消</button>
           <button id="confirm-new-game" value="confirm" class="primary-button">开始新局</button>

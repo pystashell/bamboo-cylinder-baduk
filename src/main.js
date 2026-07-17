@@ -27,8 +27,10 @@ const elements = {
   torusScene: $("#torus-scene"),
   flatScene: $("#flat-scene"),
   arcScene: $("#arc-scene"),
+  topologyQuickToggle: $("#topology-quick-toggle"),
   topologyBadgeIcon: $("#topology-badge-icon"),
   topologyBadgeText: $("#topology-badge-text"),
+  topologyBadgeAction: $("#topology-badge-action"),
   phaseLabel: $("#phase-label"),
   turnStone: $("#turn-stone"),
   turnText: $("#turn-text"),
@@ -65,6 +67,7 @@ const elements = {
   torusRules: $("#torus-rules"),
   coordinateHint: $("#coordinate-hint"),
   newGameDialog: $("#new-game-dialog"),
+  newGameSummary: $("#new-game-summary"),
   roomPanel: $("#room-panel"),
   roomStatusDot: $("#room-status-dot"),
   roomMode: $("#room-mode"),
@@ -697,6 +700,7 @@ function updateRoomUI() {
   for (const button of elements.topologyButtons) {
     button.disabled = !canChangeOnlineSettings;
   }
+  elements.topologyQuickToggle.disabled = !canChangeOnlineSettings;
   syncMovePreviewAvailability();
 }
 
@@ -727,9 +731,12 @@ function syncTopologyPresentation() {
       : "可横向滑动的竹筒表面平面展开棋盘",
   );
   elements.topologyBadgeIcon.textContent = torus ? "↔↕" : "↔";
-  elements.topologyBadgeText.textContent = torus
-    ? "环面 · 上下左右首尾相接"
-    : "竹筒 · 左右首尾相接";
+  elements.topologyBadgeText.textContent = torus ? "四边连接" : "竹筒";
+  elements.topologyBadgeAction.textContent = torus ? "换回竹筒" : "选四边连接";
+  elements.topologyQuickToggle.setAttribute(
+    "aria-label",
+    torus ? "当前为四边连接棋盘，切换回竹筒棋盘" : "当前为竹筒棋盘，切换为四边连接棋盘",
+  );
   elements.arcViewButton.hidden = torus;
   elements.threeDViewLabel.textContent = torus ? "立体环面" : "立体竹筒";
   elements.rulesSummary.textContent = torus
@@ -975,6 +982,9 @@ function requestNewGame() {
     void startNewGame();
     return;
   }
+  elements.newGameSummary.textContent = pendingTopology === TOPOLOGY_TORUS
+    ? `将建立：四边连接（上下左右首尾相接） · ${pendingSize} 路。当前对局进度将被清除。`
+    : `将建立：竹筒（左右首尾相接） · ${pendingSize} 路。当前对局进度将被清除。`;
   if (typeof elements.newGameDialog.showModal === "function") {
     elements.newGameDialog.showModal();
   } else if (window.confirm("建立新棋盘并清除当前对局？")) {
@@ -1208,6 +1218,13 @@ for (const button of elements.topologyButtons) {
     requestNewGame();
   });
 }
+
+elements.topologyQuickToggle.addEventListener("click", () => {
+  setPendingTopology(
+    game.topology === TOPOLOGY_TORUS ? TOPOLOGY_CYLINDER : TOPOLOGY_TORUS,
+  );
+  requestNewGame();
+});
 
 elements.customSize.addEventListener("change", () => {
   const raw = Number(elements.customSize.value);
