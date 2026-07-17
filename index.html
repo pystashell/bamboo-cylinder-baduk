@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#101715" />
     <meta
       name="description"
-      content="3D Baduk：支持竹筒与甜甜圈棋盘、KataGo AI、音效、悔棋、在线对局以及平面和三维视图。"
+      content="3D Baduk：支持竹筒与甜甜圈棋盘、KataGo AI、音效、悔棋、完整复盘、在线对局以及平面和三维视图。"
     />
     <title>3D Baduk · 奇异棋盘围棋</title>
   </head>
@@ -173,6 +173,50 @@
             <button id="pass-button" class="primary-button" type="button">停一手</button>
             <button id="undo-button" class="secondary-button" type="button">悔棋</button>
             <button id="new-game-button" class="secondary-button" type="button">新棋盘</button>
+          </section>
+
+          <button id="replay-button" class="secondary-button replay-entry-button" type="button">
+            <span class="replay-entry-icon" aria-hidden="true">▶</span>
+            <span>
+              <strong>复盘整局</strong>
+              <small>逐手回看，可随时切换棋盘视图</small>
+            </span>
+            <span class="replay-entry-arrow" aria-hidden="true">›</span>
+          </button>
+
+          <section id="replay-panel" class="replay-panel" aria-label="复盘播放器" hidden>
+            <div class="replay-panel-heading">
+              <span>
+                <span class="eyebrow">复盘整局</span>
+                <strong>对局时间线</strong>
+              </span>
+              <span id="replay-progress" class="replay-progress">第 0 / 0 手</span>
+            </div>
+
+            <label class="replay-timeline" for="replay-slider">
+              <span class="sr-only">选择要查看的手数</span>
+              <input id="replay-slider" type="range" min="0" max="0" step="1" value="0" />
+            </label>
+
+            <div class="replay-transport" role="group" aria-label="复盘播放控制">
+              <button id="replay-first" class="secondary-button" type="button" aria-label="回到开头" title="回到开头">|‹</button>
+              <button id="replay-prev" class="secondary-button" type="button" aria-label="上一步" title="上一步">‹</button>
+              <button id="replay-play" class="primary-button replay-play-button" type="button" aria-label="播放复盘" aria-pressed="false" title="播放">▶</button>
+              <button id="replay-next" class="secondary-button" type="button" aria-label="下一步" title="下一步">›</button>
+              <button id="replay-last" class="secondary-button" type="button" aria-label="跳到结尾" title="跳到结尾">›|</button>
+            </div>
+
+            <div class="replay-panel-footer">
+              <label class="replay-speed-label" for="replay-speed">
+                <span>播放速度</span>
+                <select id="replay-speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
+                </select>
+              </label>
+              <button id="replay-exit" class="text-button replay-exit-button" type="button">退出复盘</button>
+            </div>
           </section>
 
           <section id="undo-request-panel" class="undo-request-panel" aria-live="polite" hidden>

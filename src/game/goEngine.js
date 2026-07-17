@@ -24,6 +24,7 @@ export const TOPOLOGY_TORUS = "torus";
 // and persistence restore exactly. Keeping only the latest 32 moves bounds the
 // Durable Object value size even on a dense 25x25 board.
 export const UNDO_HISTORY_LIMIT = 32;
+export const REPLAY_VERSION = 1;
 
 export const MOVE_ERRORS = Object.freeze({
   GAME_NOT_PLAYING: "game_not_playing",
@@ -214,6 +215,56 @@ function copyLastMove(lastMove, size) {
   };
 }
 
+function copyReplayEvent(event, size, index) {
+  const label = `replay.events[${index}]`;
+  requirePlainObject(event, label);
+  requireOwnProperty(event, "type", label);
+
+  if (event.type === "play") {
+    requireOwnProperty(event, "color", label);
+    if (!VALID_COLORS.has(event.color)) {
+      throw new TypeError(`Unknown replay move color: ${event.color}`);
+    }
+    const point = copyStatePoint(event, size, label);
+    return {
+      type: "play",
+      color: event.color,
+      row: point.row,
+      col: point.col,
+    };
+  }
+
+  if (event.type === "pass") {
+    requireOwnProperty(event, "color", label);
+    if (!VALID_COLORS.has(event.color)) {
+      throw new TypeError(`Unknown replay move color: ${event.color}`);
+    }
+    return { type: "pass", color: event.color };
+  }
+
+  if (event.type === "resume_play") {
+    requireOwnProperty(event, "nextPlayer", label);
+    if (!VALID_COLORS.has(event.nextPlayer)) {
+      throw new TypeError(
+        `Unknown replay next-player color: ${event.nextPlayer}`,
+      );
+    }
+    return { type: "resume_play", nextPlayer: event.nextPlayer };
+  }
+
+  if (event.type === "toggle_dead") {
+    const point = copyStatePoint(event, size, label);
+    return { type: "toggle_dead", row: point.row, col: point.col };
+  }
+
+  if (event.type === "finish_scoring") {
+    requireOwnProperty(event, "rule", label);
+    return { type: "finish_scoring", rule: normalizeScoringRule(event.rule) };
+  }
+
+  throw new TypeError(`Unknown replay event type: ${event.type}`);
+}
+
 function isPositionHashForSize(hash, size) {
   if (typeof hash !== "string") return false;
   const rows = hash.split("/");
@@ -275,6 +326,12 @@ export class GoEngine {
     // Positional superko compares stone arrangements only (not the player to
     // move). Passing is explicitly allowed and does not add a duplicate entry.
     this.positionHistory = new Set([this.#positionHash(this.board)]);
+    this.replay = {
+      version: REPLAY_VERSION,
+      complete: true,
+      base: this.#replayBaseSnapshot(),
+      events: [],
+    };
   }
 
   /**
@@ -431,6 +488,23 @@ export class GoEngine {
         : [],
     );
 
+    if (
+      Object.prototype.hasOwnProperty.call(snapshot, "replay") &&
+      Object.prototype.hasOwnProperty.call(snapshot, "topology")
+    ) {
+      game.replay = game.#copyAndValidateReplay(snapshot.replay);
+    } else {
+      // A state saved before replay support cannot reconstruct moves that have
+      // already happened. It remains useful as a replay baseline for every
+      // subsequent move, and explicitly advertises that the record is partial.
+      game.replay = {
+        version: REPLAY_VERSION,
+        complete: false,
+        base: game.#replayBaseSnapshot(),
+        events: [],
+      };
+    }
+
     return game;
   }
 
@@ -465,6 +539,146 @@ export class GoEngine {
         row.map((value) => (value === BLACK ? "B" : value === WHITE ? "W" : ".")).join(""),
       )
       .join("/");
+  }
+
+  #replayBaseSnapshot() {
+    return {
+      ...this.getState(),
+      positionHistory: [...this.positionHistory],
+      undoHistory: [],
+    };
+  }
+
+  #copyAndValidateReplay(replay) {
+    requirePlainObject(replay, "replay");
+    for (const field of ["version", "complete", "base", "events"]) {
+      requireOwnProperty(replay, field, "replay");
+    }
+    if (replay.version !== REPLAY_VERSION) {
+      throw new TypeError(`Unsupported replay version: ${replay.version}`);
+    }
+    if (typeof replay.complete !== "boolean") {
+      throw new TypeError("replay.complete must be a boolean");
+    }
+    requirePlainObject(replay.base, "replay.base");
+    if (Object.prototype.hasOwnProperty.call(replay.base, "replay")) {
+      throw new TypeError("replay.base must not contain a nested replay");
+    }
+    if (!Array.isArray(replay.events)) {
+      throw new TypeError("replay.events must be an array");
+    }
+
+    const base = cloneSerializable(replay.base, "replay.base");
+    const replayGame = GoEngine.fromState(base);
+    if (
+      replayGame.size !== this.size ||
+      replayGame.komi !== this.komi ||
+      replayGame.scoringRule !== this.scoringRule ||
+      replayGame.topology !== this.topology
+    ) {
+      throw new TypeError("replay.base game settings do not match the state");
+    }
+
+    const events = replay.events.map((event, index) =>
+      copyReplayEvent(event, this.size, index),
+    );
+    events.forEach((event, index) => {
+      let result;
+      if (event.type === "play") {
+        if (replayGame.currentPlayer !== event.color) {
+          throw new TypeError(
+            `replay.events[${index}] color does not match the player to move`,
+          );
+        }
+        result = replayGame.play(event.row, event.col);
+      } else if (event.type === "pass") {
+        if (replayGame.currentPlayer !== event.color) {
+          throw new TypeError(
+            `replay.events[${index}] color does not match the player to move`,
+          );
+        }
+        result = replayGame.pass();
+      } else if (event.type === "resume_play") {
+        result = replayGame.resumePlay(event.nextPlayer);
+      } else if (event.type === "toggle_dead") {
+        result = replayGame.toggleDead(event.row, event.col);
+      } else {
+        result = replayGame.finishScoring(event.rule);
+      }
+      if (!result.ok) {
+        throw new TypeError(
+          `replay.events[${index}] is illegal: ${result.reason}`,
+        );
+      }
+    });
+
+    const reconstructed = replayGame.getState();
+    const current = this.getState();
+    for (const field of [
+      "board",
+      "currentPlayer",
+      "phase",
+      "consecutivePasses",
+      "captures",
+      "deadStones",
+      "lastMove",
+      "result",
+    ]) {
+      if (!sameSerializableValue(reconstructed[field], current[field])) {
+        throw new TypeError(
+          `replay events do not reconstruct the current ${field}`,
+        );
+      }
+    }
+
+    return {
+      version: REPLAY_VERSION,
+      complete: replay.complete,
+      base,
+      events,
+    };
+  }
+
+  #recordReplayMove(move) {
+    if (move.type === "play") {
+      this.replay.events.push({
+        type: "play",
+        color: move.color,
+        row: move.row,
+        col: move.col,
+      });
+    } else {
+      this.replay.events.push({ type: "pass", color: move.color });
+    }
+  }
+
+  #removeReplayMove(move) {
+    for (let index = this.replay.events.length - 1; index >= 0; index -= 1) {
+      const event = this.replay.events[index];
+      if (!["play", "pass"].includes(event.type)) continue;
+      const matches =
+        event.type === move.type &&
+        event.color === move.color &&
+        (event.type !== "play" ||
+          (event.row === move.row && event.col === move.col));
+      if (!matches) {
+        throw new TypeError("Replay history is inconsistent with undo history");
+      }
+      // Any resume marker after this move describes a scoring transition that
+      // has also been rolled back by restoring the move's undo snapshot.
+      this.replay.events.splice(index);
+      return;
+    }
+
+    // An old save can still contain undo snapshots from before replay existed.
+    // If one of those moves is undone, begin a new partial record at the newly
+    // restored position instead of pretending the missing history is complete.
+    this.replay = {
+      version: REPLAY_VERSION,
+      complete: false,
+      base: this.#replayBaseSnapshot(),
+      events: [],
+    };
   }
 
   #undoSnapshot() {
@@ -893,6 +1107,7 @@ export class GoEngine {
       captured: captured.map((stone) => ({ ...stone })),
     };
     this.#recordUndo(this.lastMove, undoSnapshot);
+    this.#recordReplayMove(this.lastMove);
 
     return {
       ok: true,
@@ -924,6 +1139,7 @@ export class GoEngine {
     if (this.consecutivePasses >= 2) this.phase = PHASE_SCORING;
     this.lastMove = { type: "pass", color };
     this.#recordUndo(this.lastMove, undoSnapshot);
+    this.#recordReplayMove(this.lastMove);
 
     return {
       ok: true,
@@ -960,6 +1176,7 @@ export class GoEngine {
       this.positionHistory.delete(movePosition);
     }
     this.#restoreUndoSnapshot(entry.before);
+    this.#removeReplayMove(entry.move);
 
     return {
       ok: true,
@@ -994,6 +1211,8 @@ export class GoEngine {
       if (shouldMarkDead) this.deadStones.add(key);
       else this.deadStones.delete(key);
     }
+
+    this.replay.events.push({ type: "toggle_dead", row, col });
 
     return {
       ok: true,
@@ -1129,6 +1348,10 @@ export class GoEngine {
     }
     this.result = this.score(rule);
     this.phase = PHASE_FINISHED;
+    this.replay.events.push({
+      type: "finish_scoring",
+      rule: this.result.rule,
+    });
     return { ok: true, ...this.result, phase: this.phase };
   }
 
@@ -1145,6 +1368,7 @@ export class GoEngine {
     this.consecutivePasses = 0;
     this.deadStones.clear();
     this.result = null;
+    this.replay.events.push({ type: "resume_play", nextPlayer });
     return { ok: true, phase: this.phase, nextPlayer: this.currentPlayer };
   }
 
@@ -1172,14 +1396,23 @@ export class GoEngine {
   /**
    * Complete persistence snapshot. Unlike getState(), this includes the full
    * positional history required to keep positional superko authoritative after
-   * a server restart or room migration.
+   * a server restart or room migration. AI search may omit the replay timeline
+   * because its short-lived clones only need the authoritative current state.
+   * @param {{includeReplay?: boolean}} [options]
    */
-  exportState() {
-    return {
+  exportState({ includeReplay = true } = {}) {
+    const state = {
       ...this.getState(),
       positionHistory: [...this.positionHistory],
       undoHistory: cloneSerializable(this.undoHistory, "undoHistory"),
     };
+    if (includeReplay) state.replay = this.getReplayState();
+    return state;
+  }
+
+  /** Complete, compact move record independent of the bounded undo window. */
+  getReplayState() {
+    return cloneSerializable(this.replay, "replay");
   }
 
   /** Return the complete persistence snapshot as JSON. */

@@ -167,6 +167,22 @@ function serializeGame(game) {
   };
 }
 
+function snapshotReplay(game) {
+  if (typeof game.getReplayState === "function") {
+    return clone(game.getReplayState());
+  }
+
+  // Older engines and lightweight test doubles do not expose replay history.
+  // Their current position is still a valid one-frame review, but it must be
+  // marked incomplete so clients never present it as the full game record.
+  return {
+    version: 1,
+    complete: false,
+    base: serializeGame(game),
+    events: [],
+  };
+}
+
 function restoreGame(value) {
   const snapshot = typeof value === "string" ? JSON.parse(value) : clone(value);
   if (!snapshot || typeof snapshot !== "object") {
@@ -442,6 +458,7 @@ export class RoomEngine {
       revision: this.state.revision,
       version: this.state.revision,
       moveCount: this.state.moveCount,
+      replay: snapshotReplay(this.game),
       undoAvailable:
         typeof this.game.canUndo === "function" && this.game.canUndo(),
       scoreConfirmations: clone(this.state.scoreConfirmations),

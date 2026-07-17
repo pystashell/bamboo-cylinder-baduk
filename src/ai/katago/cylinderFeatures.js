@@ -28,7 +28,7 @@ function pointKey(row, col) {
 export function buildCylinderFeatures(gameOrState) {
   const game =
     gameOrState instanceof GoEngine
-      ? GoEngine.fromState(gameOrState.exportState())
+      ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
   const { size } = game;
   const spatial = new Float32Array(
@@ -117,9 +117,9 @@ export function buildCylinderFeatures(gameOrState) {
 export function buildLegalPolicyMask(gameOrState) {
   const game =
     gameOrState instanceof GoEngine
-      ? GoEngine.fromState(gameOrState.exportState())
+      ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
-  const state = game.exportState();
+  const state = game.exportState({ includeReplay: false });
   const pointCount = game.size * game.size;
   const mask = new Uint8Array(pointCount + 1);
 
@@ -151,7 +151,7 @@ export function policyPriorsFromLogits({
 }) {
   const game =
     gameOrState instanceof GoEngine
-      ? GoEngine.fromState(gameOrState.exportState())
+      ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
   const { size } = game;
   const pointCount = size * size;

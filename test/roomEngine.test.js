@@ -194,6 +194,123 @@ test("serializes the game, memberships and command receipts", () => {
   );
 });
 
+test("publishes a complete defensive replay timeline in room snapshots", () => {
+  const room = createRoom();
+  joinWhite(room);
+
+  const initialReplay = room.snapshot(2_001).replay;
+  assert.equal(initialReplay.version, 1);
+  assert.equal(initialReplay.complete, true);
+  assert.equal(initialReplay.base.size, 9);
+  assert.deepEqual(initialReplay.events, []);
+
+  room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 4, col: 8 },
+    now: 3_000,
+  });
+  room.applyAction({ playerId: "white-player", action: "pass", now: 3_100 });
+
+  const replay = room.snapshot(3_101).replay;
+  assert.deepEqual(
+    replay.events.map((event) => event.type),
+    ["play", "pass"],
+  );
+  assert.deepEqual(replay.events[0], {
+    type: "play",
+    color: "black",
+    row: 4,
+    col: 8,
+  });
+  assert.deepEqual(replay.events[1], { type: "pass", color: "white" });
+
+  replay.base.board[0][0] = "white";
+  replay.events[0].row = 0;
+  replay.events.push({ type: "pass", color: "black" });
+
+  const freshReplay = room.snapshot(3_102).replay;
+  assert.equal(freshReplay.base.board[0][0], null);
+  assert.equal(freshReplay.events[0].row, 4);
+  assert.equal(freshReplay.events.length, 2);
+});
+
+test("accepted online undo removes the latest event from the replay timeline", () => {
+  const room = createRoom();
+  joinWhite(room);
+  room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 2, col: 3 },
+    now: 3_000,
+  });
+  room.applyAction({ playerId: "white-player", action: "pass", now: 3_100 });
+
+  const requested = room.applyAction({
+    playerId: "white-player",
+    action: "request_undo",
+    payload: { expectedMoveCount: 2 },
+    now: 3_200,
+  });
+  const accepted = room.applyAction({
+    playerId: "black-player",
+    action: "respond_undo",
+    payload: {
+      accept: true,
+      targetMoveCount: 2,
+      requestRevision: requested.room.undoRequest.requestRevision,
+    },
+    now: 3_300,
+  });
+
+  assert.equal(accepted.room.moveCount, 1);
+  assert.deepEqual(accepted.room.replay.events, [
+    { type: "play", color: "black", row: 2, col: 3 },
+  ]);
+});
+
+test("replay survives room serialization and legacy rooms and engines fall back safely", () => {
+  const room = createRoom();
+  joinWhite(room);
+  room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 6, col: 6 },
+    now: 3_000,
+  });
+
+  const replayBeforeRestore = room.snapshot(3_001).replay;
+  const serialized = room.serialize();
+  const restored = RoomEngine.restore(serialized);
+  assert.deepEqual(restored.snapshot(3_002).replay, replayBeforeRestore);
+
+  const legacyState = structuredClone(serialized);
+  delete legacyState.game.replay;
+  const restoredLegacy = RoomEngine.restore(legacyState);
+  const legacyReplay = restoredLegacy.snapshot(3_003).replay;
+  assert.equal(legacyReplay.version, 1);
+  assert.equal(legacyReplay.complete, false);
+  assert.deepEqual(legacyReplay.events, []);
+  assert.deepEqual(legacyReplay.base.board, legacyState.game.board);
+  assert.equal(legacyReplay.base.currentPlayer, "white");
+
+  // Transitional compatibility for an old engine or a lightweight test
+  // double that predates getReplayState().
+  const oldGameState = structuredClone(legacyState.game);
+  const oldGame = {
+    getState: () => structuredClone(oldGameState),
+    exportState: () => structuredClone(oldGameState),
+    canUndo: () => false,
+  };
+  const oldEngineRoom = new RoomEngine(structuredClone(restored.state), oldGame);
+  const fallback = oldEngineRoom.snapshot(3_004).replay;
+  assert.equal(fallback.version, 1);
+  assert.equal(fallback.complete, false);
+  assert.deepEqual(fallback.events, []);
+  assert.deepEqual(fallback.base.board, oldEngineRoom.snapshot(3_005).game.board);
+  assert.equal(fallback.base.currentPlayer, "white");
+});
+
 test("creates, serializes and restores a torus room", () => {
   const room = RoomEngine.create({
     code: "TRS234",
@@ -327,6 +444,7 @@ test("requires both colors to confirm before finishing scoring", () => {
   assert.equal(blackConfirmation.move.type, "score_confirmation");
   assert.equal(blackConfirmation.room.game.phase, "scoring");
   assert.deepEqual(blackConfirmation.room.scoreConfirmations, ["black"]);
+  assert.equal(blackConfirmation.room.replay.events.at(-1).type, "pass");
 
   const repeated = room.applyAction({
     playerId: "black-player",
@@ -344,6 +462,7 @@ test("requires both colors to confirm before finishing scoring", () => {
   assert.equal(finished.move.type, "finish_scoring");
   assert.equal(finished.room.game.phase, "finished");
   assert.deepEqual(finished.room.scoreConfirmations, ["black", "white"]);
+  assert.equal(finished.room.replay.events.at(-1).type, "finish_scoring");
 });
 
 test("changing dead stones clears scoring confirmations", () => {
@@ -371,6 +490,11 @@ test("changing dead stones clears scoring confirmations", () => {
   });
   assert.equal(changed.room.game.phase, "scoring");
   assert.deepEqual(changed.room.scoreConfirmations, []);
+  assert.deepEqual(changed.room.replay.events.at(-1), {
+    type: "toggle_dead",
+    row: 0,
+    col: 0,
+  });
 });
 
 test("persists score confirmations and restores old states without the field", () => {

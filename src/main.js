@@ -11,6 +11,7 @@ import {
   TOPOLOGY_CYLINDER,
   TOPOLOGY_TORUS,
 } from "./game/goEngine.js";
+import { buildReplayFrames } from "./game/replay.js";
 import { CylinderBoard } from "./view/CylinderBoard.js";
 import { FlatBoard } from "./view/FlatBoard.js";
 import { ArcBoard } from "./view/ArcBoard.js";
@@ -42,6 +43,17 @@ const elements = {
   passButton: $("#pass-button"),
   undoButton: $("#undo-button"),
   newGameButton: $("#new-game-button"),
+  replayButton: $("#replay-button"),
+  replayPanel: $("#replay-panel"),
+  replayProgress: $("#replay-progress"),
+  replaySlider: $("#replay-slider"),
+  replayFirst: $("#replay-first"),
+  replayPrev: $("#replay-prev"),
+  replayPlay: $("#replay-play"),
+  replayNext: $("#replay-next"),
+  replayLast: $("#replay-last"),
+  replaySpeed: $("#replay-speed"),
+  replayExit: $("#replay-exit"),
   undoRequestPanel: $("#undo-request-panel"),
   undoRequestText: $("#undo-request-text"),
   undoResponseActions: $("#undo-response-actions"),
@@ -147,6 +159,8 @@ let aiHumanColor = BLACK;
 let aiThinking = false;
 let aiWorker = null;
 let aiRequestId = 0;
+let replaySession = null;
+let replayTimer = null;
 
 const PLAYER_NAME_KEY = "bamboo-baduk-player-name";
 const SOUND_ENABLED_KEY = "3d-baduk-sound-enabled";
@@ -169,6 +183,8 @@ const KATAGO_AI = Object.freeze({
   maxIterations: 800,
   rolloutLimit: 16,
 });
+
+const REPLAY_INTERVAL_MS = 900;
 
 function colorName(color) {
   return color === BLACK ? "黑方" : "白方";
@@ -224,6 +240,137 @@ function playMoveSounds(capturedCount = 0) {
 
 function cloneSerializable(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function isReplaying() {
+  return replaySession !== null;
+}
+
+function replaySource() {
+  if (hasOnlineSession() && onlineRoom?.replay) {
+    return cloneSerializable(onlineRoom.replay);
+  }
+  if (typeof game?.getReplayState === "function") {
+    return game.getReplayState();
+  }
+  return null;
+}
+
+function replayEventCount(source = replaySource()) {
+  return Array.isArray(source?.events)
+    ? source.events.filter((event) => ["play", "pass"].includes(event?.type)).length
+    : 0;
+}
+
+function clearReplayTimer() {
+  if (replayTimer !== null) {
+    window.clearTimeout(replayTimer);
+    replayTimer = null;
+  }
+}
+
+function setReplayPlaying(playing) {
+  if (!replaySession) return;
+  replaySession.playing = Boolean(playing);
+  elements.replayPlay.textContent = replaySession.playing ? "Ⅱ" : "▶";
+  elements.replayPlay.setAttribute(
+    "aria-label",
+    replaySession.playing ? "暂停复盘" : "播放复盘",
+  );
+  elements.replayPlay.setAttribute("title", replaySession.playing ? "暂停" : "播放");
+  elements.replayPlay.setAttribute("aria-pressed", String(replaySession.playing));
+}
+
+function stopReplayPlayback() {
+  clearReplayTimer();
+  setReplayPlaying(false);
+}
+
+function replayPlaybackDelay() {
+  const speed = Number(elements.replaySpeed.value);
+  return REPLAY_INTERVAL_MS / ([0.5, 1, 2].includes(speed) ? speed : 1);
+}
+
+function scheduleReplayTick() {
+  clearReplayTimer();
+  if (!replaySession?.playing) return;
+  if (replaySession.index >= replaySession.frames.length - 1) {
+    setReplayPlaying(false);
+    return;
+  }
+  replayTimer = window.setTimeout(() => {
+    replayTimer = null;
+    if (!replaySession?.playing) return;
+    setReplayStep(replaySession.index + 1, { playSound: true, keepPlaying: true });
+    scheduleReplayTick();
+  }, replayPlaybackDelay());
+}
+
+function setReplayStep(index, { playSound = false, keepPlaying = false } = {}) {
+  if (!replaySession) return;
+  const previousIndex = replaySession.index;
+  const lastIndex = replaySession.frames.length - 1;
+  const numericIndex = Number(index);
+  const requestedIndex = Number.isFinite(numericIndex) ? Math.round(numericIndex) : 0;
+  replaySession.index = Math.max(0, Math.min(lastIndex, requestedIndex));
+  if (
+    playSound && replaySession.index === previousIndex + 1 &&
+    replaySession.frames[replaySession.index]?.lastMove?.type === "play"
+  ) {
+    const move = replaySession.frames[replaySession.index].lastMove;
+    playMoveSounds(move.captured?.length ?? 0);
+  }
+  if (!keepPlaying) stopReplayPlayback();
+  if (replaySession.index >= lastIndex) setReplayPlaying(false);
+  updateUI();
+}
+
+function startReplayPlayback() {
+  if (!replaySession) return;
+  if (replaySession.index >= replaySession.frames.length - 1) {
+    replaySession.index = 0;
+    updateUI();
+  }
+  setReplayPlaying(true);
+  scheduleReplayTick();
+}
+
+function enterReplay() {
+  if (isReplaying()) return;
+  const source = replaySource();
+  if (!source || replayEventCount(source) === 0) {
+    setMessage("至少下一手棋后，才能开始复盘。", true);
+    return;
+  }
+
+  try {
+    const replay = buildReplayFrames(cloneSerializable(source));
+    if (!Array.isArray(replay.frames) || replay.frames.length < 2) {
+      throw new TypeError("棋谱中没有可播放的棋步");
+    }
+    replaySession = {
+      frames: replay.frames,
+      steps: replay.steps,
+      complete: replay.complete !== false,
+      index: 0,
+      playing: false,
+    };
+    elements.coordinateHint.textContent = "";
+    updateUI();
+    elements.replayPlay.focus({ preventScroll: true });
+  } catch (error) {
+    console.error("Unable to start replay", error);
+    setMessage("这份棋谱暂时无法复盘，请继续当前对局或建立新棋盘。", true);
+  }
+}
+
+function exitReplay({ announce = true } = {}) {
+  if (!isReplaying()) return;
+  clearReplayTimer();
+  replaySession = null;
+  if (announce) setMessage("已退出复盘，回到当前棋局。");
+  updateUI();
+  elements.replayButton.focus({ preventScroll: true });
 }
 
 function hasOnlineSession() {
@@ -411,7 +558,10 @@ function maybeStartAITurn() {
     worker.postMessage({
       type: "think",
       id: requestId,
-      state: game.exportState(),
+      // Search clones the state many times and never needs the historical
+      // replay timeline. Keep the AI payload and its inner loops bounded as a
+      // real game grows longer.
+      state: game.exportState({ includeReplay: false }),
       options: {
         difficulty: "hard",
         timeLimitMs: level.timeMs,
@@ -490,6 +640,7 @@ function isOwnUndoRequest(request = currentUndoRequest()) {
 }
 
 function canShowMovePreview() {
+  if (isReplaying()) return false;
   if (hasOnlineSession()) {
     return shouldEnableMovePreview({
       phase: game?.phase,
@@ -614,6 +765,7 @@ function roomSeat(color) {
 function updateRoomUI() {
   const active = hasOnlineSession();
   const aiMode = isAIMode();
+  const reviewing = isReplaying();
   const connected = roomClient.connectionStatus === CONNECTION_STATUS.CONNECTED;
   const onlineReady = active && onlineRoom?.code === roomClient.roomCode && Boolean(onlineRoom.game);
   const identity = currentIdentity();
@@ -648,7 +800,7 @@ function updateRoomUI() {
     : aiMode
       ? `你执${colorName(aiHumanColor).replace("方", "")} · AI 执${colorName(aiColor()).replace("方", "")}`
       : "选择电脑或朋友作为对手";
-  elements.offlineOpponentActions.hidden = active || aiMode;
+  elements.offlineOpponentActions.hidden = active || aiMode || reviewing;
   elements.roomConnected.hidden = !active;
   elements.aiConnected.hidden = !aiMode;
 
@@ -734,36 +886,36 @@ function updateRoomUI() {
   const onlineControlsAvailable = onlineReady && connected && !onlineBusy && !onlineCommandPending;
   const canAbandonRoom = roomClient.connectionStatus === CONNECTION_STATUS.DISCONNECTED;
   const canDetachReplaced = roomClient.lastCloseCode === 4408;
-  elements.copyRoomLink.disabled = !onlineControlsAvailable;
-  elements.leaveRoom.disabled = active && (
+  elements.copyRoomLink.disabled = reviewing || !onlineControlsAvailable;
+  elements.leaveRoom.disabled = reviewing || (active && (
     onlineBusy || (!connected && !canAbandonRoom && !canDetachReplaced)
-  );
+  ));
   elements.leaveRoom.textContent = canDetachReplaced
     ? "关闭本页联机"
     : canAbandonRoom
       ? "忘记房间"
       : "退出";
-  elements.passButton.disabled = active
+  elements.passButton.disabled = reviewing || (active
     ? !(
         onlineControlsAvailable && !undoRequest && hasBothPlayers && isOnlineTurn() &&
         game.phase === PHASE_PLAY
       )
     : aiMode && (
         aiThinking || game.phase !== PHASE_PLAY || game.currentPlayer !== aiHumanColor
-      );
-  elements.newGameButton.disabled = active && !(
+      ));
+  elements.newGameButton.disabled = reviewing || (active && !(
     onlineControlsAvailable && !undoRequest && isOnlineHost()
-  );
+  ));
   elements.undoButton.textContent = active ? "申请悔棋" : "悔棋";
-  elements.undoButton.disabled = active
+  elements.undoButton.disabled = reviewing || (active
     ? !(
         onlineControlsAvailable && !undoRequest && hasBothPlayers && isOnlinePlayer() &&
         game.phase === PHASE_PLAY && onlineRoom?.undoAvailable === true
       )
     : aiMode
       ? !canUndoAIChoice()
-      : !game?.canUndo();
-  elements.undoRequestPanel.hidden = !(
+      : !game?.canUndo());
+  elements.undoRequestPanel.hidden = reviewing || !(
     active && onlineReady && undoRequest && isOnlinePlayer()
   );
   if (undoRequest) {
@@ -773,22 +925,24 @@ function updateRoomUI() {
   }
   elements.undoResponseActions.hidden = !undoRequest || ownUndoRequest;
   elements.cancelUndoRequest.hidden = !undoRequest || !ownUndoRequest;
-  elements.approveUndo.disabled = !onlineControlsAvailable || ownUndoRequest;
-  elements.declineUndo.disabled = !onlineControlsAvailable || ownUndoRequest;
-  elements.cancelUndoRequest.disabled = !onlineControlsAvailable || !ownUndoRequest;
-  elements.confirmScore.disabled = active && !(
+  elements.approveUndo.disabled = reviewing || !onlineControlsAvailable || ownUndoRequest;
+  elements.declineUndo.disabled = reviewing || !onlineControlsAvailable || ownUndoRequest;
+  elements.cancelUndoRequest.disabled = reviewing || !onlineControlsAvailable || !ownUndoRequest;
+  elements.confirmScore.disabled = reviewing || (active && !(
     onlineControlsAvailable && isOnlinePlayer() && !ownScoreConfirmed
-  );
-  elements.resumeGame.disabled = active && !(onlineControlsAvailable && isOnlinePlayer());
+  ));
+  elements.resumeGame.disabled = reviewing || (active && !(
+    onlineControlsAvailable && isOnlinePlayer()
+  ));
   elements.confirmScore.textContent = active && ownScoreConfirmed
     ? "已确认，等待对方"
     : active && scoreConfirmations.length > 0
       ? "确认同意结果"
       : "确认结果";
 
-  const canChangeOnlineSettings = active
+  const canChangeOnlineSettings = !reviewing && (active
     ? onlineControlsAvailable && !undoRequest && isOnlineHost()
-    : !aiThinking;
+    : !aiThinking);
   elements.customSize.disabled = !canChangeOnlineSettings;
   elements.scoringRule.disabled = !canChangeOnlineSettings;
   elements.komi.disabled = !canChangeOnlineSettings;
@@ -796,6 +950,8 @@ function updateRoomUI() {
   for (const button of elements.topologyButtons) {
     button.disabled = !canChangeOnlineSettings;
   }
+  elements.changeAiSettings.disabled = reviewing;
+  elements.leaveAi.disabled = reviewing;
   syncMovePreviewAvailability();
 }
 
@@ -845,6 +1001,7 @@ function rebuildViews(size, topology) {
 
 function restoreOfflineGame() {
   if (!offlineGameState) return;
+  exitReplay({ announce: false });
   cancelAIThinking();
   const previousSize = game?.size;
   const previousTopology = game?.topology;
@@ -951,6 +1108,15 @@ function applyOnlineRoom(room) {
     return;
   }
 
+  const replayFrame = replaySession?.frames?.[replaySession.index];
+  if (
+    replayFrame &&
+    (replayFrame.size !== room.game.size || replayFrame.topology !== room.game.topology)
+  ) {
+    exitReplay({ announce: false });
+    setMessage("房间已建立不同形状的新棋盘，复盘已结束并切回实时局面。");
+  }
+
   const previousRoom = onlineRoom;
   const previousSize = game?.size;
   const previousTopology = game?.topology;
@@ -1050,6 +1216,7 @@ function getNewGameOptions() {
 }
 
 async function startNewGame() {
+  exitReplay({ announce: false });
   const options = getNewGameOptions();
   if (hasOnlineSession()) {
     if (!isOnlineHost()) {
@@ -1078,6 +1245,10 @@ function hasProgress() {
 }
 
 function requestNewGame() {
+  if (isReplaying()) {
+    setMessage("请先退出复盘，再建立新棋盘。", true);
+    return;
+  }
   if (hasOnlineSession() && !isOnlineHost()) {
     setMessage("联机房间中只有黑方可以建立新棋盘。", true);
     return;
@@ -1114,16 +1285,105 @@ function updateScoreUI(score) {
   elements.scoreBreakdown.textContent = scoreBreakdown(score);
 }
 
-function updateUI() {
-  const state = game.getState();
-  const renderLastMove = lastPlayedPoint
-    ? { type: "play", ...lastPlayedPoint }
-    : state.lastMove;
-  const viewState = { ...state, lastMove: renderLastMove };
+function renderBoardPosition(state, lastMove = state.lastMove) {
+  const viewState = { ...state, lastMove };
   cylinderView?.setPosition(viewState);
   torusView?.setPosition(viewState);
   flatView?.setPosition(viewState);
   arcView?.setPosition(viewState);
+}
+
+function syncReplayEntryAvailability() {
+  const reviewing = isReplaying();
+  elements.replayButton.hidden = reviewing;
+  elements.replayPanel.hidden = !reviewing;
+  elements.replayButton.disabled = !reviewing && replayEventCount() === 0;
+}
+
+function updateReplayUI() {
+  const frame = replaySession.frames[replaySession.index];
+  const lastIndex = replaySession.frames.length - 1;
+  const move = replaySession.index > 0 ? frame.lastMove : null;
+  const atRecordedEnd = replaySession.index === lastIndex;
+  const finishedAtEnd = atRecordedEnd && frame.phase === PHASE_FINISHED;
+  const scoringAtEnd = atRecordedEnd && frame.phase === PHASE_SCORING;
+
+  renderBoardPosition(frame, move);
+  elements.blackCaptures.textContent = String(frame.captures.black);
+  elements.whiteCaptures.textContent = String(frame.captures.white);
+  elements.boardTopology.textContent =
+    `${frame.size} 路 · ${frame.size * frame.size} 点 · ${topologySurfaceName(frame.topology)}`;
+  elements.moveNumber.textContent = `复盘 · 第 ${replaySession.index} / ${lastIndex} 手`;
+  elements.phaseLabel.textContent = finishedAtEnd
+    ? "复盘终局"
+    : scoringAtEnd
+      ? "复盘至点目"
+      : replaySession.complete
+        ? "整局复盘"
+        : "续录复盘";
+  elements.turnStone.hidden = replaySession.index === 0 || finishedAtEnd || scoringAtEnd;
+  elements.turnStone.classList.toggle("black", move?.color === BLACK);
+  elements.turnStone.classList.toggle("white", move?.color === WHITE);
+  elements.turnText.textContent = finishedAtEnd
+    ? formatResult(frame.result)
+    : scoringAtEnd
+      ? "点目尚未确认"
+      : replaySession.index === 0
+        ? "开局局面"
+        : move?.type === "pass"
+          ? `${colorName(move.color)}停一手`
+          : `${colorName(move?.color)}第 ${replaySession.index} 手`;
+
+  elements.playControls.hidden = true;
+  elements.scoringPanel.hidden = true;
+  elements.replayButton.hidden = true;
+  elements.replayPanel.hidden = false;
+  elements.replayProgress.textContent = `第 ${replaySession.index} / ${lastIndex} 手`;
+  elements.replaySlider.max = String(lastIndex);
+  elements.replaySlider.value = String(replaySession.index);
+  elements.replayFirst.disabled = replaySession.index === 0;
+  elements.replayPrev.disabled = replaySession.index === 0;
+  elements.replayNext.disabled = replaySession.index === lastIndex;
+  elements.replayLast.disabled = replaySession.index === lastIndex;
+  elements.replayPlay.disabled = lastIndex === 0;
+  setReplayPlaying(replaySession.playing && replaySession.index < lastIndex);
+  elements.message.setAttribute("aria-live", replaySession.playing ? "off" : "polite");
+
+  updateRoomUI();
+  const availableViewCopy = frame.topology === TOPOLOGY_TORUS
+    ? "平面或立体视图"
+    : "平面、弧面或立体视图";
+  const replayNote = replaySession.complete
+    ? `可随时切换${availableViewCopy}。`
+    : "旧棋局只记录了升级后的棋步；仍可切换任意可用视图。";
+  if (finishedAtEnd) {
+    setMessage(`复盘结束：${formatResult(frame.result)}。最终死子标记与点目结果已还原。`);
+  } else if (scoringAtEnd) {
+    setMessage(`棋谱已播放到点目阶段，最终结果尚未确认。${replayNote}`);
+  } else if (replaySession.index === 0) {
+    setMessage(`这是复盘起点。${replayNote}`);
+  } else if (move?.type === "pass") {
+    setMessage(`第 ${replaySession.index} 手：${colorName(move.color)}停一手。${replayNote}`);
+  } else {
+    const captured = move?.captured?.length
+      ? `，提掉 ${move.captured.length} 子`
+      : "";
+    setMessage(`第 ${replaySession.index} 手：${colorName(move?.color)}落子${captured}。${replayNote}`);
+  }
+}
+
+function updateUI() {
+  if (isReplaying()) {
+    updateReplayUI();
+    return;
+  }
+
+  elements.message.setAttribute("aria-live", "polite");
+  const state = game.getState();
+  const renderLastMove = lastPlayedPoint
+    ? { type: "play", ...lastPlayedPoint }
+    : state.lastMove;
+  renderBoardPosition(state, renderLastMove);
 
   elements.blackCaptures.textContent = String(state.captures.black);
   elements.whiteCaptures.textContent = String(state.captures.white);
@@ -1140,6 +1400,7 @@ function updateUI() {
   elements.scoringPanel.hidden = playing;
   elements.confirmScore.hidden = state.phase === PHASE_FINISHED;
   elements.resumeGame.hidden = state.phase === PHASE_FINISHED;
+  syncReplayEntryAvailability();
   updateRoomUI();
 
   if (state.phase === PHASE_PLAY) {
@@ -1175,6 +1436,10 @@ function updateUI() {
 }
 
 function handleBoardPoint({ row, col }) {
+  if (isReplaying()) {
+    setMessage("复盘不会修改棋局；请退出复盘后再落子。", true);
+    return;
+  }
   if (hasOnlineSession()) {
     if (!roomClient.isConnected) {
       setMessage("房间正在重连，请稍等一下。", true);
@@ -1313,7 +1578,33 @@ function handleHover(point) {
     `${coordinate}${seamNotes.length ? ` · ${seamNotes.join(" · ")}` : ""}`;
 }
 
+elements.replayButton.addEventListener("click", enterReplay);
+elements.replayExit.addEventListener("click", () => exitReplay());
+elements.replayFirst.addEventListener("click", () => setReplayStep(0));
+elements.replayPrev.addEventListener("click", () => {
+  if (replaySession) setReplayStep(replaySession.index - 1);
+});
+elements.replayNext.addEventListener("click", () => {
+  if (replaySession) setReplayStep(replaySession.index + 1, { playSound: true });
+});
+elements.replayLast.addEventListener("click", () => {
+  if (replaySession) setReplayStep(replaySession.frames.length - 1);
+});
+elements.replayPlay.addEventListener("click", () => {
+  if (!replaySession) return;
+  if (replaySession.playing) stopReplayPlayback();
+  else startReplayPlayback();
+  updateUI();
+});
+elements.replaySlider.addEventListener("input", () => {
+  setReplayStep(Number(elements.replaySlider.value));
+});
+elements.replaySpeed.addEventListener("change", () => {
+  if (replaySession?.playing) scheduleReplayTick();
+});
+
 elements.passButton.addEventListener("click", () => {
+  if (isReplaying()) return;
   if (hasOnlineSession()) {
     if (currentUndoRequest()) {
       setMessage("请先处理当前的悔棋申请，再继续下棋。", true);
@@ -1343,6 +1634,7 @@ elements.passButton.addEventListener("click", () => {
 });
 
 elements.undoButton.addEventListener("click", () => {
+  if (isReplaying()) return;
   if (hasOnlineSession()) {
     if (currentUndoRequest()) {
       setMessage("当前已有一份悔棋申请。", true);
@@ -1385,6 +1677,7 @@ elements.cancelUndoRequest.addEventListener("click", () => {
 });
 
 elements.confirmScore.addEventListener("click", () => {
+  if (isReplaying()) return;
   if (hasOnlineSession()) {
     void sendOnlineCommand("finish_scoring");
     return;
@@ -1396,6 +1689,7 @@ elements.confirmScore.addEventListener("click", () => {
 });
 
 elements.resumeGame.addEventListener("click", () => {
+  if (isReplaying()) return;
   if (hasOnlineSession()) {
     void sendOnlineCommand("resume_play");
     return;

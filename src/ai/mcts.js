@@ -80,11 +80,17 @@ function copyMove(move) {
 }
 
 function normalizeState(gameOrState) {
-  if (gameOrState instanceof GoEngine) return gameOrState.exportState();
-  if (gameOrState && typeof gameOrState.exportState === "function") {
-    return GoEngine.fromState(gameOrState.exportState()).exportState();
+  if (gameOrState instanceof GoEngine) {
+    return gameOrState.exportState({ includeReplay: false });
   }
-  return GoEngine.fromState(gameOrState).exportState();
+  if (gameOrState && typeof gameOrState.exportState === "function") {
+    return GoEngine.fromState(
+      gameOrState.exportState({ includeReplay: false }),
+    ).exportState({
+      includeReplay: false,
+    });
+  }
+  return GoEngine.fromState(gameOrState).exportState({ includeReplay: false });
 }
 
 function normalizeDifficulty(value = "easy") {
@@ -386,7 +392,7 @@ function refineFragileTactic(game, analysis) {
     return analysis;
   }
 
-  const trial = GoEngine.fromState(game.exportState());
+  const trial = GoEngine.fromState(game.exportState({ includeReplay: false }));
   const played = trial.play(analysis.move.row, analysis.move.col);
   if (!played.ok) return analysis;
 
@@ -628,7 +634,7 @@ function expand(node, settings) {
     if (!result.ok) continue;
 
     const child = createNode(
-      game.exportState(),
+      game.exportState({ includeReplay: false }),
       copyMove(analysis.move),
       analysis,
     );
