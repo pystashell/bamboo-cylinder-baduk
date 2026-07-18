@@ -1,3 +1,5 @@
+import { trimStoredChatHistory } from "./chat.js";
+
 const DEFAULT_ROOM_PATH = "/api/rooms";
 const DEFAULT_PROTOCOL = "bamboo-baduk-v1";
 const DEFAULT_STORAGE_PREFIX = "bamboo-baduk.session.";
@@ -744,6 +746,9 @@ export class RoomClient {
         this._emit("presence", { presence, roomCode: this.roomCode, raw: message });
         break;
       }
+      case "chat":
+        this._handleChatMessage(message);
+        break;
       case "ack":
         this._handleAck(message);
         break;
@@ -757,8 +762,12 @@ export class RoomClient {
 
   _handleStateMessage(message) {
     const snapshot = message.snapshot?.room ?? message.snapshot;
-    const room = message.room ?? message.state ?? snapshot ?? message.payload ?? null;
-    if (!room) return;
+    const incoming = message.room ?? message.state ?? snapshot ?? message.payload ?? null;
+    if (!incoming) return;
+    const room =
+      incoming.chat === undefined && this.room?.chat
+        ? { ...incoming, chat: this.room.chat }
+        : incoming;
     this.room = room;
     this._emit("state", {
       room,
@@ -766,6 +775,47 @@ export class RoomClient {
       serverTime: message.serverTime ?? message.snapshot?.serverTime ?? null,
       initial: false,
       raw: message,
+    });
+  }
+
+  _handleChatMessage(event) {
+    const message = event.message ?? event.payload ?? null;
+    if (!message || typeof message !== "object" || typeof message.id !== "string") {
+      return;
+    }
+    const previous = this.room?.chat ?? { sequence: 0, messages: [] };
+    const byId = new Map(
+      (Array.isArray(previous.messages) ? previous.messages : [])
+        .filter((item) => item && typeof item.id === "string")
+        .map((item) => [item.id, item]),
+    );
+    const existing = byId.get(message.id);
+    if (
+      existing &&
+      Number(existing.sequence) >= Number(message.sequence)
+    ) {
+      return;
+    }
+    byId.set(message.id, message);
+    const messages = trimStoredChatHistory(
+      [...byId.values()]
+        .sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0)),
+    );
+    const chat = {
+      sequence: Math.max(
+        Number(previous.sequence) || 0,
+        Number(event.chatSequence) || 0,
+        Number(message.sequence) || 0,
+      ),
+      messages,
+    };
+    if (this.room) this.room = { ...this.room, chat };
+    this._emit("chat", {
+      message,
+      chat,
+      roomCode: this.roomCode,
+      serverTime: event.serverTime ?? null,
+      raw: event,
     });
   }
 
@@ -839,6 +889,10 @@ export class RoomClient {
 
   command(action, payload = {}, options = {}) {
     return this.sendCommand(action, payload, options);
+  }
+
+  sendChat(payload, options = {}) {
+    return this.sendCommand("chat", payload, options);
   }
 
   _socketIsOpen() {

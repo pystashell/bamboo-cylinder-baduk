@@ -41,6 +41,7 @@ export class FlatBoard {
     this.phase = "play";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys = new Set();
     this.hoveredPoint = null;
     this.offsetColumns = 0;
@@ -94,6 +95,7 @@ export class FlatBoard {
     this.phase = "play";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys.clear();
     this.offsetColumns = 0;
     this.offsetRows = 0;
@@ -112,12 +114,22 @@ export class FlatBoard {
     lastMove,
     deadStones = [],
     analysisMove = null,
+    referencePoint = null,
   }) {
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.referencePoint =
+      Number.isInteger(referencePoint?.row) &&
+      Number.isInteger(referencePoint?.col) &&
+      referencePoint.row >= 0 &&
+      referencePoint.row < this.size &&
+      referencePoint.col >= 0 &&
+      referencePoint.col < this.size
+        ? { row: referencePoint.row, col: referencePoint.col }
+        : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
     this.draw();
   }
@@ -144,6 +156,24 @@ export class FlatBoard {
 
   resetView() {
     this.animateOffsetTo(0, 0);
+  }
+
+  focusPoint(point) {
+    if (
+      !Number.isInteger(point?.row) ||
+      !Number.isInteger(point?.col) ||
+      point.row < 0 ||
+      point.row >= this.size ||
+      point.col < 0 ||
+      point.col >= this.size
+    ) {
+      return;
+    }
+    const centeredOffset = (this.size - 1) / 2;
+    this.animateOffsetTo(
+      centeredOffset - point.col,
+      this.wrapRows ? centeredOffset - point.row : 0,
+    );
   }
 
   resize() {
@@ -427,6 +457,7 @@ export class FlatBoard {
     this.drawStones(context);
     this.drawHover(context);
     this.drawAnalysisMove(context);
+    this.drawReferencePoint(context);
     this.drawSeam(context);
     this.drawColumnLabels(context);
   }
@@ -685,6 +716,61 @@ export class FlatBoard {
         context.beginPath();
         context.arc(x, y, radius * 0.22, 0, TAU);
         context.fill();
+        context.restore();
+      },
+    );
+    context.restore();
+  }
+
+  drawReferencePoint(context) {
+    const point = this.referencePoint;
+    if (
+      !Number.isInteger(point?.row) ||
+      !Number.isInteger(point?.col) ||
+      point.row < 0 ||
+      point.row >= this.size ||
+      point.col < 0 ||
+      point.col >= this.size
+    ) {
+      return;
+    }
+
+    const radius = clamp(this.cell * 0.34, 6, 17);
+    context.save();
+    context.beginPath();
+    context.rect(this.frameX, this.frameY, this.boardPixels, this.boardPixels);
+    context.clip();
+    this.forEachWrappedPoint(
+      this.pointX(point.col),
+      this.pointY(point.row),
+      radius + 3,
+      (x, y) => {
+        context.save();
+        context.shadowColor = "rgba(255, 45, 196, 0.9)";
+        context.shadowBlur = Math.max(7, radius * 0.75);
+        context.fillStyle = "rgba(196, 33, 153, 0.25)";
+        context.strokeStyle = "#ff4dce";
+        context.lineWidth = Math.max(2.2, radius * 0.16);
+        context.beginPath();
+        context.arc(x, y, radius, 0, TAU);
+        context.fill();
+        context.stroke();
+
+        context.shadowBlur = 0;
+        context.strokeStyle = "rgba(255, 219, 248, 0.96)";
+        context.lineWidth = Math.max(1.2, radius * 0.09);
+        const tickStart = radius * 0.57;
+        const tickEnd = radius * 0.92;
+        context.beginPath();
+        context.moveTo(x - tickEnd, y);
+        context.lineTo(x - tickStart, y);
+        context.moveTo(x + tickStart, y);
+        context.lineTo(x + tickEnd, y);
+        context.moveTo(x, y - tickEnd);
+        context.lineTo(x, y - tickStart);
+        context.moveTo(x, y + tickStart);
+        context.lineTo(x, y + tickEnd);
+        context.stroke();
         context.restore();
       },
     );

@@ -7,11 +7,20 @@ import {
   TOPOLOGY_TORUS,
   WHITE,
 } from "../game/goEngine.js";
+import {
+  ChatValidationError,
+  normalizeChatPayload,
+  trimStoredChatHistory,
+} from "./chat.js";
 import { isRoomCode, isRoomRole } from "./protocol.js";
 
 export const ROOM_TTL_MS = 24 * 60 * 60 * 1_000;
 export const MAX_SPECTATORS = 32;
 export const MAX_COMMAND_RECEIPTS = 256;
+export const CHAT_MEMBER_BURST = 5;
+export const CHAT_MEMBER_REFILL_MS = 1_200;
+export const CHAT_ROOM_BURST = 12;
+export const CHAT_ROOM_REFILL_MS = 300;
 
 const SERIALIZED_SCHEMA_VERSION = 1;
 const TOKEN_HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -230,6 +239,40 @@ function validateCoordinate(value, label) {
   return value;
 }
 
+function freshChatBucket(capacity, now) {
+  return { tokens: capacity, updatedAt: now };
+}
+
+function restoredChatBucket(value, capacity, fallbackTime) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Number.isFinite(value.tokens) ||
+    !Number.isFinite(value.updatedAt)
+  ) {
+    return freshChatBucket(capacity, fallbackTime);
+  }
+  return {
+    tokens: Math.max(0, Math.min(capacity, value.tokens)),
+    updatedAt: value.updatedAt,
+  };
+}
+
+function spendChatToken(bucket, capacity, refillMs, now) {
+  const elapsed = Math.max(0, now - bucket.updatedAt);
+  const tokens = Math.min(capacity, bucket.tokens + elapsed / refillMs);
+  if (tokens < 1) {
+    return {
+      ok: false,
+      retryAfterMs: Math.max(1, Math.ceil((1 - tokens) * refillMs)),
+    };
+  }
+  return {
+    ok: true,
+    bucket: { tokens: tokens - 1, updatedAt: now },
+  };
+}
+
 function validateSerializedState(state) {
   if (
     !state ||
@@ -364,6 +407,9 @@ export class RoomEngine {
       moveCount: 0,
       scoreConfirmations: [],
       undoRequest: null,
+      chatSequence: 0,
+      chatMessages: [],
+      chatBucket: freshChatBucket(CHAT_ROOM_BURST, now),
       game: serializeGame(game),
       members: [
         {
@@ -375,6 +421,7 @@ export class RoomEngine {
           joinedAt: now,
           lastSeenAt: now,
           lastSequence: 0,
+          chatBucket: freshChatBucket(CHAT_MEMBER_BURST, now),
         },
       ],
       receipts: [],
@@ -401,6 +448,19 @@ export class RoomEngine {
     state.moveCount ??= 0;
     state.scoreConfirmations ??= [];
     state.undoRequest ??= null;
+    state.chatMessages = trimStoredChatHistory(state.chatMessages);
+    const latestChatSequence = state.chatMessages.reduce(
+      (latest, message) => Math.max(latest, message.sequence),
+      0,
+    );
+    state.chatSequence = Number.isSafeInteger(state.chatSequence)
+      ? Math.max(state.chatSequence, latestChatSequence)
+      : latestChatSequence;
+    state.chatBucket = restoredChatBucket(
+      state.chatBucket,
+      CHAT_ROOM_BURST,
+      state.updatedAt,
+    );
     if (
       state.undoRequest &&
       !Object.prototype.hasOwnProperty.call(state.undoRequest, "requestRevision")
@@ -412,7 +472,14 @@ export class RoomEngine {
       state.undoRequest.requestRevision = state.revision;
     }
     state.receipts = state.receipts.slice(-MAX_COMMAND_RECEIPTS);
-    for (const member of state.members) member.lastSequence ??= 0;
+    for (const member of state.members) {
+      member.lastSequence ??= 0;
+      member.chatBucket = restoredChatBucket(
+        member.chatBucket,
+        CHAT_MEMBER_BURST,
+        state.updatedAt,
+      );
+    }
     return new RoomEngine(state, restoreGame(state.game));
   }
 
@@ -463,6 +530,10 @@ export class RoomEngine {
         typeof this.game.canUndo === "function" && this.game.canUndo(),
       scoreConfirmations: clone(this.state.scoreConfirmations),
       undoRequest: clone(this.state.undoRequest),
+      chat: {
+        sequence: this.state.chatSequence,
+        messages: clone(this.state.chatMessages),
+      },
       game,
       players,
       spectators,
@@ -544,6 +615,7 @@ export class RoomEngine {
       joinedAt: now,
       lastSeenAt: now,
       lastSequence: 0,
+      chatBucket: freshChatBucket(CHAT_MEMBER_BURST, now),
     };
     this.state.members.push(member);
     this.commit(now);
@@ -654,6 +726,117 @@ export class RoomEngine {
       revision: this.state.revision,
       identity: this.identityFor(member),
       room: this.snapshot(now),
+    };
+  }
+
+  postChat({
+    playerId,
+    payload = {},
+    sequence,
+    now: nowInput,
+  }) {
+    const now = readNow(nowInput);
+    this.prepare(now);
+    const member = this.requireMember(normalizePlayerId(playerId));
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+      throw new RoomEngineError(
+        "聊天消息缺少有效序号。",
+        400,
+        "BAD_REQUEST",
+      );
+    }
+
+    const memberSpend = spendChatToken(
+      restoredChatBucket(
+        member.chatBucket,
+        CHAT_MEMBER_BURST,
+        member.lastSeenAt,
+      ),
+      CHAT_MEMBER_BURST,
+      CHAT_MEMBER_REFILL_MS,
+      now,
+    );
+    if (!memberSpend.ok) {
+      throw new RoomEngineError(
+        "消息发送得太快了，请稍等一下。",
+        429,
+        "CHAT_RATE_LIMITED",
+        true,
+      );
+    }
+    // Every chat attempt consumes the same request budget, including invalid
+    // payloads. This prevents malformed text and unknown stickers from
+    // bypassing the storage-backed rate limit.
+    member.chatBucket = memberSpend.bucket;
+    this.requirePlayer(member);
+
+    // Spectator abuse is charged only to that spectator's own bucket. The
+    // shared room budget belongs to authorized players, so rejected spectator
+    // traffic cannot silence the two people who are actually playing.
+    const roomSpend = spendChatToken(
+      restoredChatBucket(
+        this.state.chatBucket,
+        CHAT_ROOM_BURST,
+        this.state.updatedAt,
+      ),
+      CHAT_ROOM_BURST,
+      CHAT_ROOM_REFILL_MS,
+      now,
+    );
+    if (!roomSpend.ok) {
+      throw new RoomEngineError(
+        "消息发送得太快了，请稍等一下。",
+        429,
+        "CHAT_RATE_LIMITED",
+        true,
+      );
+    }
+    this.state.chatBucket = roomSpend.bucket;
+
+    let normalized;
+    try {
+      normalized = normalizeChatPayload(payload, {
+        size: this.game.size,
+        topology: this.game.topology,
+      });
+    } catch (error) {
+      if (error instanceof ChatValidationError) {
+        throw new RoomEngineError(error.message, 400, error.code);
+      }
+      throw error;
+    }
+
+    const chatSequence = this.state.chatSequence + 1;
+    const message = {
+      id: `${member.playerId}:${sequence}`,
+      sequence: chatSequence,
+      senderId: member.playerId,
+      senderName: member.name,
+      senderRole: member.role,
+      senderColor: member.color,
+      kind: normalized.kind,
+      ...(normalized.kind === "text"
+        ? { text: normalized.text }
+        : { stickerId: normalized.stickerId }),
+      points: clone(normalized.points),
+      boardSize: normalized.boardSize,
+      boardTopology: normalized.boardTopology,
+      moveCount: this.state.moveCount,
+      sentAt: now,
+    };
+
+    this.state.chatSequence = chatSequence;
+    this.state.chatMessages = trimStoredChatHistory([
+      ...this.state.chatMessages,
+      message,
+    ]);
+    this.touchMember(member, now);
+
+    return {
+      changed: true,
+      revision: this.state.revision,
+      chatSequence,
+      message: clone(message),
     };
   }
 

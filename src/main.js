@@ -31,6 +31,12 @@ import { FlatBoard } from "./view/FlatBoard.js";
 import { ArcBoard } from "./view/ArcBoard.js";
 import { TorusBoard } from "./view/TorusBoard.js";
 import { RoomClient, CONNECTION_STATUS } from "./multiplayer/roomClient.js";
+import {
+  CHAT_STICKERS,
+  chatSticker,
+  COORDINATE_LETTERS,
+  formatBoardCoordinate,
+} from "./multiplayer/chat.js";
 import { sanitizeRoomCode } from "./multiplayer/protocol.js";
 import { roomRevisionHasCaughtUp } from "./multiplayer/commandSync.js";
 import { shouldEnableMovePreview } from "./ui/movePreviewPolicy.js";
@@ -126,6 +132,19 @@ const elements = {
   blackSeat: $("#black-seat"),
   whiteSeat: $("#white-seat"),
   roomHint: $("#room-hint"),
+  chatPanel: $("#chat-panel"),
+  chatConnection: $("#chat-connection"),
+  chatMessages: $("#chat-messages"),
+  chatEmpty: $("#chat-empty"),
+  chatForm: $("#chat-form"),
+  chatInput: $("#chat-input"),
+  chatPicker: $("#chat-picker"),
+  stickerPicker: $("#sticker-picker"),
+  chatEmoji: $("#chat-emoji"),
+  chatSticker: $("#chat-sticker"),
+  chatPoint: $("#chat-point"),
+  chatSend: $("#chat-send"),
+  chatStatus: $("#chat-status"),
   aiConnected: $("#ai-connected"),
   aiOpponentName: $(".ai-opponent-name"),
   aiLevelBadge: $("#ai-level-badge"),
@@ -165,7 +184,6 @@ const ERROR_MESSAGES = {
   [MOVE_ERRORS.NOTHING_TO_UNDO]: "现在没有可以撤回的棋步。",
 };
 
-const COORDINATE_LETTERS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
 let game;
 let cylinderView;
 let torusView;
@@ -182,6 +200,14 @@ let onlineBusy = false;
 let onlineCommandPending = false;
 let onlineCommandRevision = null;
 let lastAnnouncedRoomRevision = null;
+let chatSending = false;
+let chatPointPicking = false;
+let chatReferencePoint = null;
+let chatReferenceFocusViews = false;
+let chatReferenceTimer = null;
+let lastRenderedChatKey = "";
+let chatStatusMessage = "";
+let chatStatusError = false;
 let offlineGameState = null;
 let aiActive = false;
 let aiHumanColor = BLACK;
@@ -196,6 +222,11 @@ let reviewWorker = null;
 let reviewRequestId = 0;
 let reviewActive = null;
 
+const CHAT_EMOJIS = Object.freeze([
+  "😀", "😄", "😂", "😊", "🤔", "😮",
+  "😭", "😎", "👍", "👏", "🙏", "🔥",
+  "🎉", "🎋", "🍩", "🍵", "⚫", "⚪",
+]);
 const PLAYER_NAME_KEY = "bamboo-baduk-player-name";
 const SOUND_ENABLED_KEY = "3d-baduk-sound-enabled";
 const AI_MODEL_KEY = "3d-baduk-ai-model";
@@ -349,6 +380,340 @@ function formatReviewMove(move, size = game?.size ?? 19) {
   if (move?.type !== "play") return "—";
   const letter = COORDINATE_LETTERS[move.col] || String(move.col + 1);
   return `${letter}${size - move.row}`;
+}
+
+function currentChatMessages() {
+  return Array.isArray(onlineRoom?.chat?.messages)
+    ? onlineRoom.chat.messages
+    : [];
+}
+
+function activeBoardView() {
+  if (activeViewMode === "flat") return flatView;
+  if (activeViewMode === "arc") return arcView;
+  return isTorusTopology() ? torusView : cylinderView;
+}
+
+function syncReferenceFocusRotationState() {
+  if (activeViewMode === "flat") return;
+  autoRotateByView[activeViewMode] = false;
+  elements.toggleRotation.setAttribute("aria-pressed", "false");
+}
+
+function messageMatchesCurrentBoard(message) {
+  return (
+    Number(message?.boardSize) === game?.size &&
+    message?.boardTopology === game?.topology
+  );
+}
+
+function setChatStatus(message = "", error = false) {
+  chatStatusMessage = message;
+  chatStatusError = error;
+  if (!elements.chatStatus) return;
+  elements.chatStatus.textContent = message;
+  elements.chatStatus.classList.toggle("error", error);
+}
+
+function defaultChatStatus() {
+  if (!roomClient.isConnected) return "连接恢复后可以继续发送；当前草稿会保留。";
+  if (!isOnlinePlayer()) return "旁观者可以阅读聊天，只有黑白双方可以发言。";
+  if (chatPointPicking) return "请在棋盘上点击要引用的位置；这次点击不会落子。";
+  return "文字不做内容审查；仅有技术性长度与频率限制。";
+}
+
+function focusChatPoint(
+  message,
+  point,
+  { announce = true, moveCamera = true } = {},
+) {
+  if (!messageMatchesCurrentBoard(message)) {
+    setChatStatus(
+      `📍 ${point.label} 来自上一块 ${message.boardSize} 路${topologySurfaceName(message.boardTopology)}棋盘，当前不强行定位。`,
+      true,
+    );
+    return;
+  }
+  if (
+    !Number.isInteger(point.row) ||
+    !Number.isInteger(point.col) ||
+    point.row < 0 ||
+    point.row >= game.size ||
+    point.col < 0 ||
+    point.col >= game.size
+  ) {
+    setChatStatus("这条位置引用已经失效。", true);
+    return;
+  }
+
+  if (chatReferenceTimer !== null) window.clearTimeout(chatReferenceTimer);
+  chatReferencePoint = { row: point.row, col: point.col };
+  chatReferenceFocusViews = moveCamera;
+  updateUI();
+  if (moveCamera) {
+    syncReferenceFocusRotationState();
+    window.requestAnimationFrame(() => {
+      activeBoardView()?.focusPoint?.(chatReferencePoint);
+    });
+  }
+  if (announce) setChatStatus(`已在棋盘标出 📍 ${point.label}。`);
+  chatReferenceTimer = window.setTimeout(() => {
+    chatReferenceTimer = null;
+    chatReferencePoint = null;
+    chatReferenceFocusViews = false;
+    updateUI();
+  }, 8_000);
+}
+
+function renderChatMessage(message) {
+  const own = message.senderId === currentIdentity().playerId;
+  const article = document.createElement("article");
+  article.className = `chat-message${own ? " own" : ""}`;
+  article.dataset.chatId = message.id;
+
+  const meta = document.createElement("div");
+  meta.className = "chat-message-meta";
+  const name = document.createElement("span");
+  name.className = message.senderColor === BLACK ? "black-name" : "white-name";
+  name.textContent = `${message.senderName} · ${colorName(message.senderColor)}`;
+  const time = document.createElement("time");
+  time.dateTime = new Date(message.sentAt).toISOString();
+  time.textContent = new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(message.sentAt));
+  meta.append(name, time);
+
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble";
+  if (message.kind === "sticker") {
+    bubble.classList.add("chat-sticker-bubble");
+    const sticker = chatSticker(message.stickerId);
+    const emoji = document.createElement("span");
+    emoji.className = "sticker-emoji";
+    emoji.textContent = sticker?.emoji ?? "❔";
+    const label = document.createElement("span");
+    label.className = "sticker-label";
+    label.textContent = sticker?.label ?? "表情包";
+    bubble.append(emoji, label);
+  } else {
+    // Deliberately use textContent: messages are uncensored text, never HTML.
+    bubble.textContent = String(message.text ?? "");
+  }
+  article.append(meta, bubble);
+
+  if (Array.isArray(message.points) && message.points.length > 0) {
+    const pointList = document.createElement("div");
+    pointList.className = "chat-point-list";
+    const matchesBoard = messageMatchesCurrentBoard(message);
+    for (const point of message.points) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chat-point-link";
+      button.textContent = matchesBoard
+        ? `📍 ${point.label} · 查看棋盘`
+        : `📍 ${point.label} · 上一块棋盘`;
+      button.disabled = !matchesBoard;
+      button.addEventListener("click", () => focusChatPoint(message, point));
+      pointList.append(button);
+    }
+    article.append(pointList);
+  }
+  return article;
+}
+
+function renderChatHistory() {
+  const messages = currentChatMessages();
+  const key = [
+    onlineRoom?.code ?? "",
+    game?.size ?? "",
+    game?.topology ?? "",
+    ...messages.map((message) => `${message.id}:${message.sequence}`),
+  ].join("|");
+  if (key === lastRenderedChatKey) return;
+  const hadRenderedHistory = lastRenderedChatKey !== "";
+  const previousScrollTop = elements.chatMessages.scrollTop;
+  const wasNearBottom =
+    elements.chatMessages.scrollHeight -
+      elements.chatMessages.scrollTop -
+      elements.chatMessages.clientHeight <
+    36;
+  lastRenderedChatKey = key;
+
+  elements.chatMessages.replaceChildren();
+  if (messages.length === 0) {
+    elements.chatMessages.append(elements.chatEmpty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const message of messages) fragment.append(renderChatMessage(message));
+  elements.chatMessages.append(fragment);
+  elements.chatMessages.scrollTop = !hadRenderedHistory || wasNearBottom
+    ? elements.chatMessages.scrollHeight
+    : previousScrollTop;
+}
+
+function syncChatUI() {
+  const active = hasOnlineSession();
+  elements.chatPanel.hidden = !active;
+  if (!active) return;
+
+  const connected = roomClient.isConnected;
+  const canSend = connected && isOnlinePlayer() && !chatSending;
+  if (!connected || !isOnlinePlayer()) {
+    chatPointPicking = false;
+    elements.boardStage.classList.remove("chat-coordinate-picking");
+  }
+  elements.chatConnection.textContent = connected ? "实时连接" : "正在重连";
+  elements.chatConnection.classList.toggle("connected", connected);
+  elements.chatInput.disabled = !canSend;
+  elements.chatSend.disabled = !canSend || !elements.chatInput.value.trim();
+  elements.chatEmoji.disabled = !canSend;
+  elements.chatSticker.disabled = !canSend;
+  elements.chatPoint.disabled = !canSend;
+  elements.chatPoint.setAttribute("aria-pressed", String(chatPointPicking));
+  if (!chatStatusMessage) {
+    elements.chatStatus.textContent = defaultChatStatus();
+    elements.chatStatus.classList.remove("error");
+  } else {
+    elements.chatStatus.textContent = chatStatusMessage;
+    elements.chatStatus.classList.toggle("error", chatStatusError);
+  }
+  renderChatHistory();
+}
+
+function closeChatPickers() {
+  elements.chatPicker.hidden = true;
+  elements.stickerPicker.hidden = true;
+  elements.chatEmoji.setAttribute("aria-expanded", "false");
+  elements.chatSticker.setAttribute("aria-expanded", "false");
+}
+
+function toggleChatPicker(kind) {
+  const emoji = kind === "emoji";
+  const target = emoji ? elements.chatPicker : elements.stickerPicker;
+  const willOpen = target.hidden;
+  closeChatPickers();
+  target.hidden = !willOpen;
+  (emoji ? elements.chatEmoji : elements.chatSticker)
+    .setAttribute("aria-expanded", String(willOpen));
+}
+
+function insertChatText(text) {
+  const input = elements.chatInput;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? input.value.length;
+  input.value = `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
+  const cursor = start + text.length;
+  input.setSelectionRange(cursor, cursor);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+function setChatPointPicking(enabled) {
+  chatPointPicking = Boolean(enabled) && roomClient.isConnected && isOnlinePlayer();
+  closeChatPickers();
+  elements.boardStage.classList.toggle(
+    "chat-coordinate-picking",
+    chatPointPicking,
+  );
+  elements.chatPoint.setAttribute("aria-pressed", String(chatPointPicking));
+  setChatStatus(chatPointPicking
+    ? "请在棋盘上点击要引用的位置；这次点击不会落子。"
+    : "");
+  syncChatUI();
+}
+
+function insertPickedChatPoint(row, col) {
+  const label = formatBoardCoordinate(row, col, game.size);
+  if (!label) {
+    setChatStatus("没有识别到这个棋点。", true);
+    return;
+  }
+  const prefix = elements.chatInput.value && !/\s$/u.test(elements.chatInput.value)
+    ? " "
+    : "";
+  insertChatText(`${prefix}${label} `);
+  setChatPointPicking(false);
+  setChatStatus(`已引用 📍 ${label}；发送后双方都能点击定位。`);
+}
+
+async function sendChatPayload(payload, { clearText = false } = {}) {
+  if (!roomClient.isConnected || !isOnlinePlayer() || chatSending) return;
+  chatSending = true;
+  setChatStatus("正在发送…");
+  syncChatUI();
+  try {
+    await roomClient.sendChat(payload);
+    if (clearText) elements.chatInput.value = "";
+    closeChatPickers();
+    setChatStatus("");
+  } catch (error) {
+    setChatStatus(error.message || "消息发送失败，请稍后重试。", true);
+  } finally {
+    chatSending = false;
+    syncChatUI();
+  }
+}
+
+function buildChatPickers() {
+  for (const emoji of CHAT_EMOJIS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = emoji;
+    button.setAttribute("aria-label", `插入 ${emoji}`);
+    button.addEventListener("click", () => insertChatText(emoji));
+    elements.chatPicker.append(button);
+  }
+  for (const sticker of CHAT_STICKERS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", `发送表情包：${sticker.label}`);
+    const emoji = document.createElement("span");
+    emoji.textContent = sticker.emoji;
+    const label = document.createElement("span");
+    label.textContent = sticker.label;
+    button.append(emoji, label);
+    button.addEventListener("click", () => {
+      void sendChatPayload({ kind: "sticker", stickerId: sticker.id });
+    });
+    elements.stickerPicker.append(button);
+  }
+}
+
+function applyOnlineChat({ message, chat }) {
+  if (!onlineRoom || !message) return;
+  onlineRoom = { ...onlineRoom, chat };
+  lastRenderedChatKey = "";
+  syncChatUI();
+  if (
+    message.senderId !== currentIdentity().playerId &&
+    Array.isArray(message.points) &&
+    message.points.length > 0 &&
+    messageMatchesCurrentBoard(message)
+  ) {
+    focusChatPoint(message, message.points[0], {
+      announce: false,
+      moveCamera: false,
+    });
+    setChatStatus(
+      `${message.senderName} 提到了 📍 ${message.points[0].label}，已标记；点击坐标可转到该处。`,
+    );
+  }
+}
+
+function resetChatSessionState({ clearDraft = true } = {}) {
+  chatSending = false;
+  chatPointPicking = false;
+  chatReferencePoint = null;
+  chatReferenceFocusViews = false;
+  lastRenderedChatKey = "";
+  setChatStatus("");
+  if (chatReferenceTimer !== null) window.clearTimeout(chatReferenceTimer);
+  chatReferenceTimer = null;
+  elements.boardStage.classList.remove("chat-coordinate-picking");
+  closeChatPickers();
+  if (clearDraft) elements.chatInput.value = "";
 }
 
 function currentReviewModel() {
@@ -1330,6 +1695,7 @@ function updateRoomUI() {
   }
   elements.changeAiSettings.disabled = reviewing;
   elements.leaveAi.disabled = reviewing;
+  syncChatUI();
   syncMovePreviewAvailability();
 }
 
@@ -1520,6 +1886,10 @@ function applyOnlineRoom(room) {
     : null;
 
   if (previousSize !== game.size || previousTopology !== game.topology) {
+    if (chatReferenceTimer !== null) window.clearTimeout(chatReferenceTimer);
+    chatReferenceTimer = null;
+    chatReferencePoint = null;
+    chatReferenceFocusViews = false;
     rebuildViews(game.size, game.topology);
   }
   setPendingSize(game.size);
@@ -1673,8 +2043,9 @@ function renderBoardPosition(
   state,
   lastMove = state.lastMove,
   analysisMove = null,
+  referencePoint = chatReferencePoint,
 ) {
-  const viewState = { ...state, lastMove, analysisMove };
+  const viewState = { ...state, lastMove, analysisMove, referencePoint };
   cylinderView?.setPosition(viewState);
   torusView?.setPosition(viewState);
   flatView?.setPosition(viewState);
@@ -1920,6 +2291,10 @@ function updateUI() {
 }
 
 function handleBoardPoint({ row, col }) {
+  if (chatPointPicking && hasOnlineSession()) {
+    insertPickedChatPoint(row, col);
+    return;
+  }
   if (isReplaying()) {
     setMessage("复盘不会修改棋局；请退出复盘后再落子。", true);
     return;
@@ -2059,7 +2434,9 @@ function handleHover(point) {
     seamNotes.push("最上行与最下行相邻");
   }
   elements.coordinateHint.textContent =
-    `${coordinate}${seamNotes.length ? ` · ${seamNotes.join(" · ")}` : ""}`;
+    `${coordinate}${seamNotes.length ? ` · ${seamNotes.join(" · ")}` : ""}${
+      chatPointPicking ? " · 点击引用到聊天（不会落子）" : ""
+    }`;
 }
 
 elements.replayButton.addEventListener("click", enterReplay);
@@ -2311,6 +2688,12 @@ function setViewMode(mode) {
   elements.gesturePrimary.textContent = viewCopy.primaryGesture;
   elements.gestureSecondary.textContent = viewCopy.secondaryGesture;
   elements.coordinateHint.textContent = "";
+  if (chatReferencePoint && chatReferenceFocusViews) {
+    syncReferenceFocusRotationState();
+    window.requestAnimationFrame(() => {
+      activeBoardView()?.focusPoint?.(chatReferencePoint);
+    });
+  }
 }
 
 for (const button of elements.viewButtons) {
@@ -2352,6 +2735,7 @@ async function createOnlineRoom() {
   setOnlineBusy(true, "create");
   try {
     const result = await roomClient.createRoom({ name, ...getNewGameOptions() });
+    resetChatSessionState();
     updateRoomUrl(result.roomCode);
     closeOnlineDialog();
     setMessage(`房间 ${result.roomCode} 已创建，把邀请链接发给朋友吧。`);
@@ -2386,6 +2770,7 @@ async function joinOnlineRoom() {
   setOnlineBusy(true, "join");
   try {
     const result = await roomClient.joinRoom({ code, name, role: "player" });
+    resetChatSessionState();
     updateRoomUrl(result.roomCode);
     closeOnlineDialog();
     const identity = result.session ?? roomClient.identity;
@@ -2433,6 +2818,7 @@ function returnToOffline(message) {
   onlineCommandPending = false;
   onlineCommandRevision = null;
   lastAnnouncedRoomRevision = null;
+  resetChatSessionState();
   updateRoomUrl();
   restoreOfflineGame();
   setMessage(message);
@@ -2504,6 +2890,37 @@ elements.createRoom.addEventListener("click", () => void createOnlineRoom());
 elements.joinRoom.addEventListener("click", () => void joinOnlineRoom());
 elements.copyRoomLink.addEventListener("click", () => void copyInvitationLink());
 elements.leaveRoom.addEventListener("click", () => void leaveOnlineRoom());
+elements.chatForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = elements.chatInput.value;
+  if (!text.trim()) return;
+  void sendChatPayload({ kind: "text", text }, { clearText: true });
+});
+elements.chatInput.addEventListener("input", () => {
+  if (chatStatusError) setChatStatus("");
+  syncChatUI();
+});
+elements.chatInput.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    const text = elements.chatInput.value;
+    if (text.trim()) {
+      void sendChatPayload({ kind: "text", text }, { clearText: true });
+    }
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setChatPointPicking(false);
+    closeChatPickers();
+  }
+});
+elements.chatEmoji.addEventListener("click", () => toggleChatPicker("emoji"));
+elements.chatSticker.addEventListener("click", () => toggleChatPicker("sticker"));
+elements.chatPoint.addEventListener("click", () => {
+  setChatPointPicking(!chatPointPicking);
+});
 elements.toggleSound.addEventListener("click", () => {
   soundEnabled = !soundEnabled;
   gameSounds.setEnabled(soundEnabled);
@@ -2535,6 +2952,7 @@ roomClient.on("connection", (event) => {
   updateRoomUI();
 });
 roomClient.on("state", ({ room }) => applyOnlineRoom(room));
+roomClient.on("chat", applyOnlineChat);
 roomClient.on("presence", ({ presence }) => {
   if (!onlineRoom) return;
   onlineRoom = {
@@ -2583,6 +3001,7 @@ arcView = new ArcBoard(elements.arcScene, {
   onPoint: handleBoardPoint,
   onHover: handleHover,
 });
+buildChatPickers();
 syncTopologyPresentation();
 syncSoundControl();
 setViewMode("arc");

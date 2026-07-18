@@ -12,6 +12,7 @@ export const ROOM_ACTIONS = Object.freeze([
   "request_undo",
   "respond_undo",
   "cancel_undo",
+  "chat",
   "new_game",
   "leave",
   "sync",
@@ -78,6 +79,7 @@ export function normalizeCommandMessage(value) {
   ) {
     return null;
   }
+  if (action === "chat" && sequence === undefined) return null;
 
   return {
     id: value.id,
@@ -102,6 +104,16 @@ export function makePresenceMessage(room, serverTime = Date.now()) {
     type: "presence",
     players: room.players,
     spectators: room.spectators,
+    serverTime,
+  };
+}
+
+export function makeChatMessage(message, serverTime = Date.now()) {
+  return {
+    v: BADUK_PROTOCOL_VERSION,
+    type: "chat",
+    message,
+    chatSequence: message.sequence,
     serverTime,
   };
 }

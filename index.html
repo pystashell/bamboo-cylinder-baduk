@@ -141,6 +141,45 @@
             </div>
           </section>
 
+          <section id="chat-panel" class="chat-panel" aria-label="房间聊天" hidden>
+            <div class="chat-heading">
+              <span>
+                <span class="eyebrow">实时联机</span>
+                <strong>对局聊天</strong>
+              </span>
+              <span id="chat-connection" class="chat-connection">连接中</span>
+            </div>
+
+            <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+              <p id="chat-empty" class="chat-empty">还没有消息，先和对手打个招呼吧。</p>
+            </div>
+
+            <form id="chat-form" class="chat-composer">
+              <label class="sr-only" for="chat-input">聊天内容</label>
+              <textarea
+                id="chat-input"
+                rows="2"
+                maxlength="300"
+                placeholder="输入文字或 D4、K10 等位置编号…"
+              ></textarea>
+
+              <div id="chat-picker" class="chat-picker" hidden></div>
+              <div id="sticker-picker" class="sticker-picker" hidden></div>
+
+              <div class="chat-toolbar">
+                <div class="chat-tool-group">
+                  <button id="chat-emoji" class="chat-tool-button" type="button" aria-label="选择表情" aria-expanded="false">😊</button>
+                  <button id="chat-sticker" class="chat-tool-button" type="button" aria-label="选择表情包" aria-expanded="false">表情包</button>
+                  <button id="chat-point" class="chat-tool-button" type="button" aria-label="从棋盘选择位置" aria-pressed="false">📍选棋点</button>
+                </div>
+                <button id="chat-send" class="primary-button chat-send" type="submit">发送</button>
+              </div>
+              <p id="chat-status" class="chat-status">
+                文字不做内容审查；仅有技术性长度与频率限制。
+              </p>
+            </form>
+          </section>
+
           <section class="turn-card" aria-labelledby="turn-label">
             <div>
               <span id="phase-label" class="eyebrow">对局中</span>

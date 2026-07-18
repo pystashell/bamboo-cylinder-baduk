@@ -1100,3 +1100,258 @@ test("expires exactly 24 hours after the last meaningful room touch", () => {
   assert.equal(expired.room, null);
   assert.equal(room.nextDueAt(), null);
 });
+
+test("players can chat without changing the game revision or censoring text", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  const before = room.snapshot(1_101);
+  const text = "D4 这里？<script>alert('x')</script> 👨‍👩‍👧‍👦";
+  const posted = room.postChat({
+    playerId: "black-player",
+    sequence: 1,
+    payload: { kind: "text", text },
+    now: 2_000,
+  });
+
+  assert.equal(posted.revision, before.revision);
+  assert.equal(posted.message.text, text);
+  assert.deepEqual(posted.message.points, [
+    { row: 5, col: 3, label: "D4" },
+  ]);
+  assert.equal(posted.message.boardSize, 9);
+  assert.equal(posted.message.boardTopology, "cylinder");
+  assert.equal(posted.message.moveCount, 0);
+
+  const after = room.snapshot(2_001);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.moveCount, 0);
+  assert.deepEqual(after.game.board, before.game.board);
+  assert.equal(after.chat.sequence, 1);
+  assert.equal(after.chat.messages.length, 1);
+  assert.ok(after.expiresAt > before.expiresAt);
+
+  after.chat.messages[0].text = "被客户端篡改";
+  assert.equal(room.snapshot(2_002).chat.messages[0].text, text);
+  assert.equal(
+    RoomEngine.restore(room.serialize()).snapshot(2_003).chat.messages[0].text,
+    text,
+  );
+});
+
+test("spectators cannot send chat and sticker ids are server validated", () => {
+  const room = createRoom();
+  joinWhite(room);
+  room.join({
+    name: "观众",
+    role: "spectator",
+    playerId: "viewer",
+    tokenHash: VIEWER_HASH,
+    now: 2_100,
+  });
+
+  assert.throws(
+    () =>
+      room.postChat({
+        playerId: "viewer",
+        sequence: 1,
+        payload: { kind: "text", text: "我只能旁观" },
+        now: 3_000,
+    }),
+    (error) => error instanceof RoomEngineError && error.code === "FORBIDDEN",
+  );
+  for (let sequence = 2; sequence <= 5; sequence += 1) {
+    assert.throws(
+      () =>
+        room.postChat({
+          playerId: "viewer",
+          sequence,
+          payload: { kind: "text", text: "旁观请求也要受限速" },
+          now: 3_000,
+        }),
+      (error) => error instanceof RoomEngineError && error.code === "FORBIDDEN",
+    );
+  }
+  assert.throws(
+    () =>
+      room.postChat({
+        playerId: "viewer",
+        sequence: 6,
+        payload: { kind: "text", text: "不能无限触发拒绝写入" },
+        now: 3_000,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "CHAT_RATE_LIMITED",
+  );
+  assert.throws(
+    () =>
+      room.postChat({
+        playerId: "black-player",
+        sequence: 1,
+        payload: { kind: "sticker", stickerId: "https://evil.example/x.svg" },
+        now: 3_001,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "UNKNOWN_STICKER",
+  );
+  assert.equal(room.snapshot(3_002).chat.messages.length, 0);
+});
+
+test("spectator abuse does not consume the players' shared chat budget", () => {
+  const room = createRoom();
+  joinWhite(room);
+
+  for (let spectatorIndex = 1; spectatorIndex <= 3; spectatorIndex += 1) {
+    const playerId = `viewer-${spectatorIndex}`;
+    room.join({
+      name: `Viewer ${spectatorIndex}`,
+      role: "spectator",
+      playerId,
+      tokenHash: String(spectatorIndex).repeat(64),
+      now: 2_100,
+    });
+
+    for (let sequence = 1; sequence <= 5; sequence += 1) {
+      assert.throws(
+        () =>
+          room.postChat({
+            playerId,
+            sequence,
+            payload: { kind: "text", text: "spectator abuse" },
+            now: 3_000,
+          }),
+        (error) =>
+          error instanceof RoomEngineError && error.code === "FORBIDDEN",
+      );
+    }
+  }
+
+  for (const playerId of ["black-player", "white-player"]) {
+    for (let sequence = 1; sequence <= 5; sequence += 1) {
+      room.postChat({
+        playerId,
+        sequence,
+        payload: { kind: "sticker", stickerId: "good-move" },
+        now: 3_000,
+      });
+    }
+  }
+
+  assert.equal(room.snapshot(3_001).chat.messages.length, 10);
+});
+
+test("invalid chat attempts consume the same persistent rate limit", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  for (let sequence = 1; sequence <= 5; sequence += 1) {
+    assert.throws(
+      () =>
+        room.postChat({
+          playerId: "black-player",
+          sequence,
+          payload: { kind: "sticker", stickerId: `unknown-${sequence}` },
+          now: 2_000,
+        }),
+      (error) =>
+        error instanceof RoomEngineError && error.code === "UNKNOWN_STICKER",
+    );
+  }
+  assert.throws(
+    () =>
+      room.postChat({
+        playerId: "black-player",
+        sequence: 6,
+        payload: { kind: "text", text: "无效消息不能绕过限速" },
+        now: 2_000,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "CHAT_RATE_LIMITED",
+  );
+  assert.equal(room.snapshot(2_001).chat.messages.length, 0);
+
+  const restored = RoomEngine.restore(room.serialize());
+  assert.throws(
+    () =>
+      restored.postChat({
+        playerId: "black-player",
+        sequence: 6,
+        payload: { kind: "text", text: "重载后仍然限速" },
+        now: 2_100,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "CHAT_RATE_LIMITED",
+  );
+});
+
+test("chat uses persistent burst limits and recovers tokens over time", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  for (let sequence = 1; sequence <= 5; sequence += 1) {
+    room.postChat({
+      playerId: "black-player",
+      sequence,
+      payload: { kind: "sticker", stickerId: "good-move" },
+      now: 2_000,
+    });
+  }
+  assert.throws(
+    () =>
+      room.postChat({
+        playerId: "black-player",
+        sequence: 6,
+        payload: { kind: "text", text: "太快了" },
+        now: 2_000,
+      }),
+    (error) =>
+      error instanceof RoomEngineError &&
+      error.code === "CHAT_RATE_LIMITED" &&
+      error.retryable,
+  );
+  assert.equal(room.snapshot(2_001).chat.messages.length, 5);
+
+  const restored = RoomEngine.restore(room.serialize());
+  assert.throws(
+    () =>
+      restored.postChat({
+        playerId: "black-player",
+        sequence: 6,
+        payload: { kind: "text", text: "重连也不能绕过限速" },
+        now: 2_100,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "CHAT_RATE_LIMITED",
+  );
+  restored.postChat({
+    playerId: "black-player",
+    sequence: 6,
+    payload: { kind: "text", text: "冷却后可以继续" },
+    now: 3_200,
+  });
+  assert.equal(restored.snapshot(3_201).chat.messages.length, 6);
+});
+
+test("chat history stays bounded and legacy rooms restore with empty chat", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  for (let sequence = 1; sequence <= 101; sequence += 1) {
+    room.postChat({
+      playerId: "black-player",
+      sequence,
+      payload: { kind: "sticker", stickerId: "bamboo" },
+      now: 2_000 + sequence * 1_200,
+    });
+  }
+  const snapshot = room.snapshot(124_000);
+  assert.equal(snapshot.chat.messages.length, 100);
+  assert.equal(snapshot.chat.messages[0].sequence, 2);
+  assert.equal(snapshot.chat.messages.at(-1).sequence, 101);
+
+  const legacy = createRoom().serialize();
+  delete legacy.chatSequence;
+  delete legacy.chatMessages;
+  delete legacy.chatBucket;
+  for (const member of legacy.members) delete member.chatBucket;
+  assert.deepEqual(RoomEngine.restore(legacy).snapshot(1_001).chat, {
+    sequence: 0,
+    messages: [],
+  });
+});

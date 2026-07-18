@@ -78,6 +78,7 @@ export class CylinderBoard {
     this.currentPlayer = "black";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys = new Set();
     this.pointerStart = null;
     this.hoveredPoint = null;
@@ -155,6 +156,7 @@ export class CylinderBoard {
   rebuild(size) {
     this.size = size;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.radius = (size * CELL) / TAU;
     this.gridHeight = (size - 1) * CELL;
     this.edgeMargin = 0.52;
@@ -365,12 +367,22 @@ export class CylinderBoard {
     lastMove,
     deadStones = [],
     analysisMove = null,
+    referencePoint = null,
   }) {
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.referencePoint =
+      Number.isInteger(referencePoint?.row) &&
+      Number.isInteger(referencePoint?.col) &&
+      referencePoint.row >= 0 &&
+      referencePoint.row < this.size &&
+      referencePoint.col >= 0 &&
+      referencePoint.col < this.size
+        ? { row: referencePoint.row, col: referencePoint.col }
+        : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
 
     while (this.stonesGroup.children.length > 0) {
@@ -417,6 +429,13 @@ export class CylinderBoard {
       !board[this.analysisMove.row]?.[this.analysisMove.col]
     ) {
       this.addAnalysisMarker(this.analysisMove.row, this.analysisMove.col);
+    }
+    if (this.referencePoint) {
+      this.addReferenceMarker(
+        this.referencePoint.row,
+        this.referencePoint.col,
+        Boolean(board[this.referencePoint.row]?.[this.referencePoint.col]),
+      );
     }
     this.refreshHover();
   }
@@ -468,6 +487,39 @@ export class CylinderBoard {
         color: 0xf3cf78,
         side: THREE.DoubleSide,
         depthTest: true,
+      }),
+    );
+    center.position.copy(centerFrame.position);
+    center.quaternion.setFromUnitVectors(LOCAL_FORWARD, centerFrame.normal);
+    this.markersGroup.add(center);
+  }
+
+  addReferenceMarker(row, col, occupied) {
+    const surfaceOffset = occupied ? 0.292 : 0.082;
+    const frame = this.frame(row, col, surfaceOffset);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.155, 0.225, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xff48cc,
+        transparent: true,
+        opacity: 0.96,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      }),
+    );
+    ring.position.copy(frame.position);
+    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
+    this.markersGroup.add(ring);
+
+    const centerFrame = this.frame(row, col, surfaceOffset + 0.007);
+    const center = new THREE.Mesh(
+      new THREE.CircleGeometry(0.052, 20),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb6ec,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
       }),
     );
     center.position.copy(centerFrame.position);
@@ -572,6 +624,43 @@ export class CylinderBoard {
     const distance = Math.max(this.surfaceHeight * 1.62, this.radius * 5.4);
     this.camera.position.set(0, 0, distance);
     this.controls.target.set(0, 0, 0);
+    this.controls.update();
+  }
+
+  focusPoint(point) {
+    if (
+      !Number.isInteger(point?.row) ||
+      !Number.isInteger(point?.col) ||
+      point.row < 0 ||
+      point.row >= this.size ||
+      point.col < 0 ||
+      point.col >= this.size
+    ) {
+      return;
+    }
+    this.controls.autoRotate = false;
+    const frame = this.frame(point.row, point.col);
+    const previousOffset = this.camera.position
+      .clone()
+      .sub(this.controls.target);
+    const distance = Math.max(
+      this.controls.minDistance,
+      Math.min(this.controls.maxDistance, previousOffset.length()),
+    );
+    const verticalOffset = Math.max(
+      -distance * 0.55,
+      Math.min(distance * 0.55, previousOffset.y),
+    );
+    const horizontalDistance = Math.sqrt(
+      Math.max(0.01, distance * distance - verticalOffset * verticalOffset),
+    );
+    this.controls.target.set(0, frame.position.y, 0);
+    this.camera.position.set(
+      frame.normal.x * horizontalDistance,
+      frame.position.y + verticalOffset,
+      frame.normal.z * horizontalDistance,
+    );
+    this.camera.up.set(0, 1, 0);
     this.controls.update();
   }
 

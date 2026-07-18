@@ -111,6 +111,7 @@ export class TorusBoard {
     this.currentPlayer = "black";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys = new Set();
     this.pointerStart = null;
     this.hoveredPoint = null;
@@ -204,6 +205,7 @@ export class TorusBoard {
     this.phase = "play";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys.clear();
     this.hoveredPoint = null;
     this.pointerStart = null;
@@ -388,12 +390,22 @@ export class TorusBoard {
     lastMove,
     deadStones = [],
     analysisMove = null,
+    referencePoint = null,
   }) {
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.referencePoint =
+      Number.isInteger(referencePoint?.row) &&
+      Number.isInteger(referencePoint?.col) &&
+      referencePoint.row >= 0 &&
+      referencePoint.row < this.size &&
+      referencePoint.col >= 0 &&
+      referencePoint.col < this.size
+        ? { row: referencePoint.row, col: referencePoint.col }
+        : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
 
     while (this.stonesGroup.children.length > 0) {
@@ -440,6 +452,13 @@ export class TorusBoard {
       !board[this.analysisMove.row]?.[this.analysisMove.col]
     ) {
       this.addAnalysisMarker(this.analysisMove.row, this.analysisMove.col);
+    }
+    if (this.referencePoint) {
+      this.addReferenceMarker(
+        this.referencePoint.row,
+        this.referencePoint.col,
+        Boolean(board[this.referencePoint.row]?.[this.referencePoint.col]),
+      );
     }
     this.refreshHover();
   }
@@ -491,6 +510,39 @@ export class TorusBoard {
         color: 0xf3cf78,
         side: THREE.DoubleSide,
         depthTest: true,
+      }),
+    );
+    center.position.copy(centerFrame.position);
+    center.quaternion.setFromUnitVectors(LOCAL_FORWARD, centerFrame.normal);
+    this.markersGroup.add(center);
+  }
+
+  addReferenceMarker(row, col, occupied) {
+    const surfaceOffset = occupied ? 0.282 : 0.078;
+    const frame = this.frame(row, col, surfaceOffset);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.15, 0.218, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xff48cc,
+        transparent: true,
+        opacity: 0.96,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      }),
+    );
+    ring.position.copy(frame.position);
+    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
+    this.markersGroup.add(ring);
+
+    const centerFrame = this.frame(row, col, surfaceOffset + 0.007);
+    const center = new THREE.Mesh(
+      new THREE.CircleGeometry(0.05, 20),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb6ec,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
       }),
     );
     center.position.copy(centerFrame.position);
@@ -629,6 +681,39 @@ export class TorusBoard {
     this.camera.position.set(0, 0, distance);
     this.camera.up.set(0, 1, 0);
     this.controls.target.set(0, 0, 0);
+    this.controls.update();
+    this.needsFit = false;
+  }
+
+  focusPoint(point) {
+    if (
+      !Number.isInteger(point?.row) ||
+      !Number.isInteger(point?.col) ||
+      point.row < 0 ||
+      point.row >= this.size ||
+      point.col < 0 ||
+      point.col >= this.size
+    ) {
+      return;
+    }
+    this.controls.autoRotate = false;
+    const frame = this.frame(point.row, point.col);
+    const normal = frame.normal.clone().normalize();
+    // Keep enough of the curved neighbourhood in view to preserve the torus
+    // context while still making the referenced intersection unmistakable.
+    const focusDistance = Math.max(
+      4.8,
+      (this.majorRadius + this.minorRadius) * 1.2,
+    );
+    this.controls.target.copy(frame.position);
+    this.camera.position
+      .copy(frame.position)
+      .addScaledVector(normal, focusDistance);
+    if (Math.abs(normal.z) > 0.88) {
+      this.camera.up.set(0, 1, 0);
+    } else {
+      this.camera.up.set(0, 0, 1);
+    }
     this.controls.update();
     this.needsFit = false;
   }

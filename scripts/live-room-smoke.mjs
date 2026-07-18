@@ -93,6 +93,55 @@ try {
     "Torus topology was not preserved across room creation and join",
   );
 
+  const uncensoredText = "讨论 D4：<script>alert('still text')</script> 👨‍👩‍👧‍👦";
+  const blackSawOwnChat = waitFor(
+    black,
+    "chat",
+    ({ message }) => message?.text === uncensoredText,
+    "black text chat on sender client",
+  );
+  const whiteSawBlackChat = waitFor(
+    white,
+    "chat",
+    ({ message }) => message?.text === uncensoredText,
+    "black text chat on white client",
+  );
+  await black.sendChat({ kind: "text", text: uncensoredText });
+  const [blackTextChat, whiteTextChat] = await Promise.all([
+    blackSawOwnChat,
+    whiteSawBlackChat,
+  ]);
+  requireCondition(
+    blackTextChat.message.id === whiteTextChat.message.id &&
+      blackTextChat.message.points?.length === 1 &&
+      blackTextChat.message.points[0].row === 5 &&
+      blackTextChat.message.points[0].col === 3 &&
+      blackTextChat.message.points[0].label === "D4",
+    "Text chat or its authoritative D4 coordinate was not synchronized",
+  );
+
+  const blackSawSticker = waitFor(
+    black,
+    "chat",
+    ({ message }) => message?.kind === "sticker" && message?.stickerId === "donut",
+    "white sticker chat on black client",
+  );
+  const whiteSawOwnSticker = waitFor(
+    white,
+    "chat",
+    ({ message }) => message?.kind === "sticker" && message?.stickerId === "donut",
+    "white sticker chat on sender client",
+  );
+  await white.sendChat({ kind: "sticker", stickerId: "donut" });
+  const [blackStickerChat, whiteStickerChat] = await Promise.all([
+    blackSawSticker,
+    whiteSawOwnSticker,
+  ]);
+  requireCondition(
+    blackStickerChat.message.id === whiteStickerChat.message.id,
+    "Sticker chat was not synchronized to both clients",
+  );
+
   const whiteSawBlackMove = waitFor(
     white,
     "state",
@@ -166,6 +215,12 @@ try {
     blackFinal.room.revision === whiteFinal.room.revision,
     "Black and white clients disagree about the room revision after undo",
   );
+  requireCondition(
+    JSON.stringify(black.room.chat?.messages) ===
+      JSON.stringify(white.room.chat?.messages) &&
+      black.room.chat?.messages?.length === 2,
+    "Black and white clients disagree about the chat history",
+  );
 
   console.log(
     JSON.stringify({
@@ -182,6 +237,10 @@ try {
       restoredBlackStone: blackFinal.room.game.board[0][0],
       restoredWhitePoint: blackFinal.room.game.board[0][1],
       undoAccepted: true,
+      chatMessages: black.room.chat.messages.length,
+      textPreserved: black.room.chat.messages[0].text === uncensoredText,
+      coordinate: black.room.chat.messages[0].points[0].label,
+      sticker: black.room.chat.messages[1].stickerId,
       synchronized: true,
     }),
   );

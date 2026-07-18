@@ -102,6 +102,7 @@ export class ArcBoard {
     this.currentPlayer = "black";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys = new Set();
     this.offsetColumns = 0;
     this.pointerState = null;
@@ -200,6 +201,7 @@ export class ArcBoard {
     this.phase = "play";
     this.lastMove = null;
     this.analysisMove = null;
+    this.referencePoint = null;
     this.deadKeys.clear();
     this.offsetColumns = 0;
     this.pointerState = null;
@@ -515,12 +517,22 @@ export class ArcBoard {
     lastMove,
     deadStones = [],
     analysisMove = null,
+    referencePoint = null,
   }) {
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.referencePoint =
+      Number.isInteger(referencePoint?.row) &&
+      Number.isInteger(referencePoint?.col) &&
+      referencePoint.row >= 0 &&
+      referencePoint.row < this.size &&
+      referencePoint.col >= 0 &&
+      referencePoint.col < this.size
+        ? { row: referencePoint.row, col: referencePoint.col }
+        : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
 
     while (this.stonesGroup.children.length > 0) {
@@ -569,6 +581,13 @@ export class ArcBoard {
       !board[this.analysisMove.row]?.[this.analysisMove.col]
     ) {
       this.addAnalysisMarker(this.analysisMove.row, this.analysisMove.col);
+    }
+    if (this.referencePoint) {
+      this.addReferenceMarker(
+        this.referencePoint.row,
+        this.referencePoint.col,
+        Boolean(board[this.referencePoint.row]?.[this.referencePoint.col]),
+      );
     }
     this.refreshHover();
   }
@@ -625,6 +644,41 @@ export class ArcBoard {
     center.userData.row = row;
     center.userData.col = col;
     center.userData.surfaceOffset = 0.078;
+    this.positionMarker(center, row, col);
+    this.markersGroup.add(center);
+  }
+
+  addReferenceMarker(row, col, occupied) {
+    const surfaceOffset = occupied ? 0.292 : 0.082;
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.155, 0.225, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xff48cc,
+        transparent: true,
+        opacity: 0.96,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      }),
+    );
+    ring.userData.row = row;
+    ring.userData.col = col;
+    ring.userData.surfaceOffset = surfaceOffset;
+    this.positionMarker(ring, row, col);
+    this.markersGroup.add(ring);
+
+    const center = new THREE.Mesh(
+      new THREE.CircleGeometry(0.052, 20),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb6ec,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      }),
+    );
+    center.userData.row = row;
+    center.userData.col = col;
+    center.userData.surfaceOffset = surfaceOffset + 0.007;
     this.positionMarker(center, row, col);
     this.markersGroup.add(center);
   }
@@ -848,6 +902,22 @@ export class ArcBoard {
   resetView() {
     this.fitCamera();
     this.animateOffsetTo(0);
+  }
+
+  focusPoint(point) {
+    if (
+      !Number.isInteger(point?.row) ||
+      !Number.isInteger(point?.col) ||
+      point.row < 0 ||
+      point.row >= this.size ||
+      point.col < 0 ||
+      point.col >= this.size
+    ) {
+      return;
+    }
+    this.autoSlide = false;
+    this.controls.autoRotate = false;
+    this.animateOffsetTo((this.size - 1) / 2 - point.col);
   }
 
   fitCamera() {

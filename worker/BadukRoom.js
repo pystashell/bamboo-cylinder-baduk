@@ -2,6 +2,7 @@ import {
   BADUK_PROTOCOL_VERSION,
   isRecord,
   makeAckMessage,
+  makeChatMessage,
   makeErrorMessage,
   makePresenceMessage,
   makeStateMessage,
@@ -348,11 +349,17 @@ export class BadukRoom {
     }
 
     try {
-      const result = this.engine.applyAction({
-        playerId,
-        action: command.action,
-        payload: command.payload,
-      });
+      const result = command.action === "chat"
+        ? this.engine.postChat({
+            playerId,
+            payload: command.payload,
+            sequence: command.sequence,
+          })
+        : this.engine.applyAction({
+            playerId,
+            action: command.action,
+            payload: command.payload,
+          });
 
       if (command.action !== "leave") {
         this.engine.recordCommand({
@@ -364,7 +371,9 @@ export class BadukRoom {
       await this.persist();
       this.safeSend(socket, makeAckMessage(command, result.revision));
 
-      if (command.action === "sync") {
+      if (command.action === "chat") {
+        this.broadcastChat(result.message);
+      } else if (command.action === "sync") {
         this.sendState(socket, result.room);
       } else {
         this.broadcastState();
@@ -378,7 +387,11 @@ export class BadukRoom {
     } catch (error) {
       const normalized = this.normalizeError(error);
       try {
-        if (command.action !== "leave" && this.engine.member(playerId)) {
+        const shouldPersistRejection =
+          command.action !== "leave" &&
+          normalized.code !== "CHAT_RATE_LIMITED" &&
+          this.engine.member(playerId);
+        if (shouldPersistRejection) {
           this.engine.recordCommand({
             playerId,
             id: command.id,
@@ -492,6 +505,11 @@ export class BadukRoom {
     }
     const message = makePresenceMessage(room);
     for (const socket of this.joinedSockets(excluded)) this.safeSend(socket, message);
+  }
+
+  broadcastChat(message) {
+    const event = makeChatMessage(message);
+    for (const socket of this.joinedSockets()) this.safeSend(socket, event);
   }
 
   joinedSockets(excluded) {

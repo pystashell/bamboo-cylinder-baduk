@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { CHAT_HISTORY_MAX_BYTES } from "../src/multiplayer/chat.js";
 import {
   CONNECTION_STATUS,
   RoomClient,
@@ -227,6 +228,111 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
   assert.equal((await commandPromise).ok, true);
   assert.ok(statuses.includes(CONNECTION_STATUS.CONNECTED));
   assert.equal(createTokenStore(storage).get("AB12CD").nextSequence, 2);
+  client.disconnect();
+});
+
+test("RoomClient sends chat independently and merges incremental chat events", async () => {
+  MockWebSocket.instances = [];
+  const chats = [];
+  const client = new RoomClient({
+    baseUrl: "https://baduk.example/",
+    storage: createMemoryStorage(),
+    WebSocketImpl: MockWebSocket,
+    commandAckTimeoutMs: 0,
+    idFactory: () => "chat-1",
+    fetchImpl: async () =>
+      jsonResponse({
+        session: {
+          code: "AB12CD",
+          token: "secret",
+          playerId: "black",
+          playerName: "黑方",
+          role: "player",
+          color: "black",
+        },
+        room: {
+          code: "AB12CD",
+          revision: 1,
+          chat: { sequence: 0, messages: [] },
+        },
+      }),
+  });
+  client.on("chat", (event) => chats.push(event));
+  await client.createRoom({ name: "黑方" });
+  const socket = MockWebSocket.instances[0];
+  socket.open();
+
+  const pending = client.sendChat({
+    kind: "text",
+    text: "D4 <script>只是文字</script> 😄",
+  });
+  assert.deepEqual(JSON.parse(socket.sent[0]), {
+    v: 1,
+    type: "command",
+    id: "chat-1",
+    sequence: 1,
+    action: "chat",
+    payload: {
+      kind: "text",
+      text: "D4 <script>只是文字</script> 😄",
+    },
+  });
+  socket.message({
+    type: "ack",
+    id: "chat-1",
+    sequence: 1,
+    ok: true,
+    revision: 1,
+  });
+  await pending;
+
+  const message = {
+    id: "black:1",
+    sequence: 1,
+    senderId: "black",
+    senderName: "黑方",
+    senderRole: "player",
+    senderColor: "black",
+    kind: "text",
+    text: "D4 <script>只是文字</script> 😄",
+    points: [{ row: 5, col: 3, label: "D4" }],
+    boardSize: 9,
+    boardTopology: "cylinder",
+    moveCount: 0,
+    sentAt: 2_000,
+  };
+  socket.message({ type: "chat", message, chatSequence: 1, serverTime: 2_000 });
+  socket.message({ type: "chat", message, chatSequence: 1, serverTime: 2_001 });
+  assert.equal(chats.length, 1);
+  assert.equal(client.room.chat.messages.length, 1);
+  assert.equal(client.room.chat.messages[0].text, message.text);
+
+  socket.message({
+    type: "state",
+    room: { code: "AB12CD", revision: 2 },
+  });
+  assert.equal(client.room.chat.messages.length, 1);
+
+  for (let sequence = 2; sequence <= 80; sequence += 1) {
+    socket.message({
+      type: "chat",
+      chatSequence: sequence,
+      message: {
+        ...message,
+        id: `black:${sequence}`,
+        sequence,
+        text: "界".repeat(300),
+        points: [],
+        sentAt: 2_000 + sequence,
+      },
+    });
+  }
+  const chatBytes = new TextEncoder().encode(
+    JSON.stringify(client.room.chat.messages),
+  ).byteLength;
+  assert.ok(chatBytes <= CHAT_HISTORY_MAX_BYTES);
+  assert.ok(client.room.chat.messages.length < 80);
+  assert.equal(client.room.chat.messages.at(-1).sequence, 80);
   client.disconnect();
 });
 
