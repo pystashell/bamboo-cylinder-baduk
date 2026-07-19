@@ -9,6 +9,7 @@ import {
   PHASE_SCORING,
   REPLAY_VERSION,
   TOPOLOGY_CYLINDER,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
   UNDO_HISTORY_LIMIT,
   WHITE,
@@ -35,8 +36,12 @@ function playSparseMoves(game, count, startIndex = 0) {
   }
 }
 
-test("cylinder and torus games expand into render-ready frames", () => {
-  for (const topology of [TOPOLOGY_CYLINDER, TOPOLOGY_TORUS]) {
+test("all supported topologies expand into render-ready frames", () => {
+  for (const topology of [
+    TOPOLOGY_CYLINDER,
+    TOPOLOGY_TORUS,
+    TOPOLOGY_MOBIUS,
+  ]) {
     const game = new GoEngine({ size: 5, topology });
     assert.equal(game.play(0, 0).ok, true);
     assert.equal(game.play(4, 4).ok, true);
@@ -84,6 +89,35 @@ test("replay reconstructs seam captures and exposes captured stones per step", (
   assert.equal(frames[1].board[2][4], BLACK);
   assert.equal(frames[1].captures[BLACK], 1);
   assert.deepEqual(steps[0].captured, [{ row: 2, col: 0 }]);
+});
+
+test("replay reconstructs a capture across the reversed Mobius seam", () => {
+  const game = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_MOBIUS,
+    currentPlayer: BLACK,
+    initialBoard: boardFromRows([
+      "B....",
+      "WB...",
+      "B....",
+      ".....",
+      ".....",
+    ]),
+  });
+  assert.equal(game.play(3, 4).ok, true);
+
+  const replay = game.getReplayState();
+  const { frames, steps } = buildReplayFrames(replay);
+
+  assert.equal(frames[0].board[1][0], WHITE);
+  assert.equal(frames[1].board[1][0], EMPTY);
+  assert.equal(frames[1].board[3][4], BLACK);
+  assert.equal(frames[1].captures[BLACK], 1);
+  assert.deepEqual(steps[0].captured, [{ row: 1, col: 0 }]);
+
+  const restoredState = buildReplayStateAtStep(replay, 1);
+  assert.equal(restoredState.topology, TOPOLOGY_MOBIUS);
+  assert.deepEqual(GoEngine.fromState(restoredState).getState(), frames[1]);
 });
 
 test("passes and resume-play replay without counting resume as a move", () => {

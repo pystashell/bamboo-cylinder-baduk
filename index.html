@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#101715" />
     <meta
       name="description"
-      content="3D Baduk：支持竹筒与甜甜圈棋盘、KataGo AI、音效、悔棋、完整复盘、在线对局以及平面和三维视图。"
+      content="3D Baduk：支持竹筒、甜甜圈与莫比乌斯棋盘、KataGo AI、音效、悔棋、完整复盘、在线对局以及平面和三维视图。"
     />
     <title>3D Baduk · 奇异棋盘围棋</title>
   </head>
@@ -25,6 +25,7 @@
         <div class="topology-switch" role="group" aria-label="棋盘形状">
           <button type="button" data-board-topology="cylinder" class="active" aria-pressed="true">竹筒</button>
           <button type="button" data-board-topology="torus" aria-pressed="false">甜甜圈</button>
+          <button type="button" data-board-topology="mobius" aria-pressed="false">莫比乌斯</button>
         </div>
       </header>
 
@@ -34,6 +35,7 @@
           <div id="arc-scene" class="view-surface" aria-label="可横向循环滑动的3D弧面棋盘"></div>
           <div id="scene" class="view-surface" aria-label="可旋转的3D竹筒围棋棋盘" hidden></div>
           <div id="torus-scene" class="view-surface" aria-label="可旋转的3D甜甜圈围棋棋盘" hidden></div>
+          <div id="mobius-scene" class="view-surface" aria-label="可旋转的3D莫比乌斯围棋棋盘" hidden></div>
 
           <div class="view-switch" role="group" aria-label="棋盘视图">
             <button type="button" data-view-mode="flat" aria-pressed="false">
@@ -339,6 +341,9 @@
                 <button type="button" data-board-topology="torus" aria-pressed="false">
                   甜甜圈 · 上下左右连接
                 </button>
+                <button type="button" data-board-topology="mobius" aria-pressed="false">
+                  莫比乌斯 · 左右反向连接
+                </button>
               </div>
             </div>
 
@@ -396,6 +401,14 @@
               <li>立体视图就是甜甜圈；数学上叫环面，内圈格子会比外圈更密。</li>
               <li>禁自杀并采用位置超级劫，提子、连通与点目都跨越四条接缝计算。</li>
               <li>双方连续停一手后进入点目，可先标记死子。</li>
+            </ul>
+            <ul id="mobius-rules" hidden>
+              <li>最左与最右反向相接：左侧第 1 行连接右侧末行，左侧第 2 行连接右侧倒数第 2 行。</li>
+              <li>上下仍是同一圈棋盘边界，因此边界点有三口气；原来的四个角不再是角。</li>
+              <li>平面视图可横向拖动；滑过完整一圈后棋盘会上下翻转，再滑一圈才恢复方向。</li>
+              <li>立体视图是一条只有一个面的莫比乌斯带，可旋转观察棋子如何跨越扭转接缝。</li>
+              <li>禁自杀并采用位置超级劫，提子、连通、AI 判断与点目都按反向接缝计算。</li>
+              <li>双方连续停一手后进入点目，可先标记死子；复盘可在平面与立体视图间切换。</li>
             </ul>
           </details>
 
@@ -469,7 +482,7 @@
           </select>
         </label>
 
-        <p class="ai-level-note">模型会被浏览器缓存，不会每手重新下载。官方普通围棋网络达到职业级以上，但竹筒与甜甜圈棋力无法诚实换算成人类几段。</p>
+        <p class="ai-level-note">模型会被浏览器缓存，不会每手重新下载。官方普通围棋网络达到职业级以上，但竹筒、甜甜圈与莫比乌斯棋力无法诚实换算成人类几段。</p>
         <div class="dialog-actions">
           <button id="cancel-ai" class="secondary-button" type="button">取消</button>
           <button id="start-ai" class="primary-button" type="submit">开始对局</button>

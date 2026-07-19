@@ -1,9 +1,11 @@
+import { mobiusPointFromCover } from "./mobiusTopology.js";
+
 /**
  * Pure Go rules for periodically connected boards.
  *
  * Cylinders retain their normal top/bottom boundaries while columns are
- * periodic. Tori make both rows and columns periodic. Stones are placed on
- * intersections.
+ * periodic. Tori make both rows and columns periodic. Mobius strips retain one
+ * boundary and reverse rows across the column seam. Stones are intersections.
  */
 
 export const EMPTY = null;
@@ -19,6 +21,7 @@ export const SCORING_CHINESE = "chinese";
 
 export const TOPOLOGY_CYLINDER = "cylinder";
 export const TOPOLOGY_TORUS = "torus";
+export const TOPOLOGY_MOBIUS = "mobius";
 
 // Undo snapshots contain a complete board so that captures, scoring transitions
 // and persistence restore exactly. Keeping only the latest 32 moves bounds the
@@ -39,7 +42,11 @@ export const MOVE_ERRORS = Object.freeze({
 
 const VALID_COLORS = new Set([BLACK, WHITE]);
 const VALID_PHASES = new Set([PHASE_PLAY, PHASE_SCORING, PHASE_FINISHED]);
-const VALID_TOPOLOGIES = new Set([TOPOLOGY_CYLINDER, TOPOLOGY_TORUS]);
+const VALID_TOPOLOGIES = new Set([
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
+  TOPOLOGY_MOBIUS,
+]);
 
 export function oppositeColor(color) {
   return color === BLACK ? WHITE : BLACK;
@@ -285,7 +292,7 @@ export class GoEngine {
    *   the intended presets, but any integer >= 3 is supported).
    * @param {number} [options.komi=6.5]
    * @param {'japanese'|'chinese'} [options.scoringRule='japanese']
-   * @param {'cylinder'|'torus'} [options.topology='cylinder']
+   * @param {'cylinder'|'torus'|'mobius'} [options.topology='cylinder']
    * @param {Array<Array<'black'|'white'|null>>} [options.initialBoard]
    * @param {'black'|'white'} [options.currentPlayer='black']
    */
@@ -965,18 +972,24 @@ export class GoEngine {
   }
 
   /**
-   * Orthogonal neighbours. Columns always wrap. Rows wrap on a torus and stop
-   * at the top and bottom on a cylinder.
+   * Orthogonal neighbours. Cylinders and tori join columns without changing
+   * rows. A Mobius strip joins the column seam after reversing the row. Rows
+   * wrap only on a torus; cylinders and Mobius strips retain one boundary.
    *
    * @returns {Point[]}
    */
   neighbors(row, col) {
     if (!this.#validPoint(row, col)) return [];
 
-    const candidates = [
-      { row, col: (col - 1 + this.size) % this.size },
-      { row, col: (col + 1) % this.size },
-    ];
+    const candidates = this.topology === TOPOLOGY_MOBIUS
+      ? [col - 1, col + 1].map((coverColumn) => {
+          const point = mobiusPointFromCover(row, coverColumn, this.size);
+          return { row: point.row, col: point.col };
+        })
+      : [
+          { row, col: (col - 1 + this.size) % this.size },
+          { row, col: (col + 1) % this.size },
+        ];
     if (this.topology === TOPOLOGY_TORUS) {
       candidates.push(
         { row: (row - 1 + this.size) % this.size, col },

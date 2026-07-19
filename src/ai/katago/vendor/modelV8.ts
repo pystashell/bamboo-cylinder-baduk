@@ -1,5 +1,5 @@
 // Adapted from Sir-Teo/web-katrain (MIT), copyright 2026 Web KatRain Contributors.
-// The conv2d helper uses horizontal circular padding for Bamboo Cylinder Baduk.
+// The conv2d helper follows each supported board topology at convolution seams.
 // See THIRD_PARTY_NOTICES.md for the complete notice.
 
 import * as tf from '@tensorflow/tfjs';
@@ -12,6 +12,8 @@ import type {
 } from './binModelParser';
 
 type TfBn = { scale: tf.Tensor4D; bias: tf.Tensor4D };
+
+export type BoardTopology = 'cylinder' | 'torus' | 'mobius';
 
 type TfConv = {
   kernelY: number;
@@ -82,27 +84,33 @@ function bnAct(x: tf.Tensor4D, bn: TfBn, activation: ActivationKind): tf.Tensor4
   return applyActivation4D(y, activation);
 }
 
-function conv2d(
-  x: tf.Tensor4D,
-  conv: TfConv,
-  wrapRows: boolean
-): tf.Tensor4D {
-  const padY = Math.floor(((conv.kernelY - 1) * conv.dilationY) / 2);
-  const padX = Math.floor(((conv.kernelX - 1) * conv.dilationX) / 2);
+function normalizedTopology(topology: BoardTopology | boolean): BoardTopology {
+  if (topology === true) return 'torus';
+  if (topology === false) return 'cylinder';
+  return topology;
+}
 
-  // Columns are always a closed ring. A torus also closes rows, while a
-  // cylinder retains KataGo's ordinary zero padding at the top and bottom.
-  // The setting is supplied per inference so overlapping worker jobs cannot
-  // leak one board's topology into another through mutable model state.
+export function padSpatialForTopology(
+  x: tf.Tensor4D,
+  padY: number,
+  padX: number,
+  topologyInput: BoardTopology | boolean = 'cylinder'
+): tf.Tensor4D {
+  const topology = normalizedTopology(topologyInput);
+
   let padded = x;
   if (padX > 0) {
     const width = x.shape[2];
-    const left = x.slice([0, 0, width - padX, 0], [-1, -1, padX, -1]);
-    const right = x.slice([0, 0, 0, 0], [-1, -1, padX, -1]);
+    let left = x.slice([0, 0, width - padX, 0], [-1, -1, padX, -1]);
+    let right = x.slice([0, 0, 0, 0], [-1, -1, padX, -1]);
+    if (topology === 'mobius') {
+      left = tf.reverse(left, [1]) as tf.Tensor4D;
+      right = tf.reverse(right, [1]) as tf.Tensor4D;
+    }
     padded = tf.concat([left, x, right], 2) as tf.Tensor4D;
   }
   if (padY > 0) {
-    if (wrapRows) {
+    if (topology === 'torus') {
       const height = padded.shape[1];
       const top = padded.slice([0, height - padY, 0, 0], [-1, padY, -1, -1]);
       const bottom = padded.slice([0, 0, 0, 0], [-1, padY, -1, -1]);
@@ -116,6 +124,20 @@ function conv2d(
       ]) as tf.Tensor4D;
     }
   }
+
+  return padded;
+}
+
+function conv2d(
+  x: tf.Tensor4D,
+  conv: TfConv,
+  topology: BoardTopology | boolean
+): tf.Tensor4D {
+  const padY = Math.floor(((conv.kernelY - 1) * conv.dilationY) / 2);
+  const padX = Math.floor(((conv.kernelX - 1) * conv.dilationX) / 2);
+  // The setting is supplied per inference so overlapping worker jobs cannot
+  // leak one board's topology into another through mutable model state.
+  const padded = padSpatialForTopology(x, padY, padX, topology);
 
   return tf.conv2d(
     padded,
@@ -394,7 +416,7 @@ export class KataGoModelV8Tf {
   forward(
     spatial: tf.Tensor4D,
     global: tf.Tensor2D,
-    wrapRows = false
+    topology: BoardTopology | boolean = 'cylinder'
   ): {
     policy: tf.Tensor4D;
     policyPass: tf.Tensor2D;
@@ -403,22 +425,22 @@ export class KataGoModelV8Tf {
     ownership: tf.Tensor4D;
   } {
     return tf.tidy(() => {
-      const trunk = this.forwardTrunk(spatial, global, wrapRows);
+      const trunk = this.forwardTrunk(spatial, global, topology);
 
       // Policy head
-      let p1Out = conv2d(trunk, this.p1, wrapRows);
-      const g1Out = conv2d(trunk, this.g1, wrapRows);
+      let p1Out = conv2d(trunk, this.p1, topology);
+      const g1Out = conv2d(trunk, this.g1, topology);
       const g1Out2 = bnAct(g1Out, this.g1BN, this.g1Activation);
       const g1Concat = poolRowsGPool(g1Out2); // [N, g1C*3]
       const g1Bias = tf.matMul(g1Concat, this.gpoolToBias.w) as tf.Tensor2D; // [N, p1C]
       p1Out = p1Out.add(g1Bias.reshape([g1Bias.shape[0], 1, 1, g1Bias.shape[1]])) as tf.Tensor4D;
       const p1Out2 = bnAct(p1Out, this.p1BN, this.p1Activation);
 
-      const policy = conv2d(p1Out2, this.p2, wrapRows); // [N,19,19,policyOutChannels]
+      const policy = conv2d(p1Out2, this.p2, topology); // [N,19,19,policyOutChannels]
       const policyPass = this.forwardPolicyPass(g1Concat); // [N,policyOutChannels]
 
       // Value head
-      const v1Out = conv2d(trunk, this.v1, wrapRows);
+      const v1Out = conv2d(trunk, this.v1, topology);
       const v1Out2 = bnAct(v1Out, this.v1BN, this.v1Activation);
       const v1Mean = poolRowsValueHead(v1Out2); // [N,96]
       let v2Out = tf.matMul(v1Mean, this.v2.w) as tf.Tensor2D; // [N,64]
@@ -432,7 +454,7 @@ export class KataGoModelV8Tf {
         scoreValue = scoreValue.slice([0, 0], [scoreValue.shape[0], 4]) as tf.Tensor2D;
       }
 
-      const ownership = conv2d(v1Out2, this.ownership, wrapRows); // [N,19,19,1]
+      const ownership = conv2d(v1Out2, this.ownership, topology); // [N,19,19,1]
 
       return { policy, policyPass, value, scoreValue, ownership };
     });
@@ -441,7 +463,7 @@ export class KataGoModelV8Tf {
   forwardPolicyValue(
     spatial: tf.Tensor4D,
     global: tf.Tensor2D,
-    wrapRows = false
+    topology: BoardTopology | boolean = 'cylinder'
   ): {
     policy: tf.Tensor4D;
     policyPass: tf.Tensor2D;
@@ -449,20 +471,20 @@ export class KataGoModelV8Tf {
     scoreValue: tf.Tensor2D;
   } {
     return tf.tidy(() => {
-      const trunk = this.forwardTrunk(spatial, global, wrapRows);
+      const trunk = this.forwardTrunk(spatial, global, topology);
 
-      let p1Out = conv2d(trunk, this.p1, wrapRows);
-      const g1Out = conv2d(trunk, this.g1, wrapRows);
+      let p1Out = conv2d(trunk, this.p1, topology);
+      const g1Out = conv2d(trunk, this.g1, topology);
       const g1Out2 = bnAct(g1Out, this.g1BN, this.g1Activation);
       const g1Concat = poolRowsGPool(g1Out2);
       const g1Bias = tf.matMul(g1Concat, this.gpoolToBias.w) as tf.Tensor2D;
       p1Out = p1Out.add(g1Bias.reshape([g1Bias.shape[0], 1, 1, g1Bias.shape[1]])) as tf.Tensor4D;
       const p1Out2 = bnAct(p1Out, this.p1BN, this.p1Activation);
 
-      const policy = conv2d(p1Out2, this.p2, wrapRows);
+      const policy = conv2d(p1Out2, this.p2, topology);
       const policyPass = this.forwardPolicyPass(g1Concat);
 
-      const v1Out = conv2d(trunk, this.v1, wrapRows);
+      const v1Out = conv2d(trunk, this.v1, topology);
       const v1Out2 = bnAct(v1Out, this.v1BN, this.v1Activation);
       const v1Mean = poolRowsValueHead(v1Out2);
       let v2Out = tf.matMul(v1Mean, this.v2.w) as tf.Tensor2D;
@@ -483,14 +505,14 @@ export class KataGoModelV8Tf {
   forwardValueOnly(
     spatial: tf.Tensor4D,
     global: tf.Tensor2D,
-    wrapRows = false
+    topology: BoardTopology | boolean = 'cylinder'
   ): {
     value: tf.Tensor2D;
     scoreValue: tf.Tensor2D;
   } {
     return tf.tidy(() => {
-      const trunk = this.forwardTrunk(spatial, global, wrapRows);
-      const v1Out = conv2d(trunk, this.v1, wrapRows);
+      const trunk = this.forwardTrunk(spatial, global, topology);
+      const v1Out = conv2d(trunk, this.v1, topology);
       const v1Out2 = bnAct(v1Out, this.v1BN, this.v1Activation);
       const v1Mean = poolRowsValueHead(v1Out2);
       let v2Out = tf.matMul(v1Mean, this.v2.w) as tf.Tensor2D;
@@ -510,12 +532,12 @@ export class KataGoModelV8Tf {
   private forwardTrunk(
     spatial: tf.Tensor4D,
     global: tf.Tensor2D,
-    wrapRows: boolean
+    topology: BoardTopology | boolean
   ): tf.Tensor4D {
-    let trunk = conv2d(spatial, this.trunkConv1, wrapRows);
+    let trunk = conv2d(spatial, this.trunkConv1, topology);
     const ginput = tf.matMul(global, this.trunkGInput.w) as tf.Tensor2D;
     trunk = trunk.add(ginput.reshape([ginput.shape[0], 1, 1, ginput.shape[1]])) as tf.Tensor4D;
-    trunk = this.applyBlockStack(trunk, this.trunkBlocks, wrapRows);
+    trunk = this.applyBlockStack(trunk, this.trunkBlocks, topology);
     return bnAct(trunk, this.trunkTipBN, this.trunkTipActivation);
   }
 
@@ -532,38 +554,38 @@ export class KataGoModelV8Tf {
   private applyBlockStack(
     trunk: tf.Tensor4D,
     blocks: TfTrunkBlock[],
-    wrapRows: boolean
+    topology: BoardTopology | boolean
   ): tf.Tensor4D {
     for (const block of blocks) {
       if (block.kind === 'ordinary') {
         const a = bnAct(trunk, block.preBN, block.preActivation);
-        const b = conv2d(a, block.w1, wrapRows);
+        const b = conv2d(a, block.w1, topology);
         const c = bnAct(b, block.midBN, block.midActivation);
-        const d = conv2d(c, block.w2, wrapRows);
+        const d = conv2d(c, block.w2, topology);
         trunk = trunk.add(d) as tf.Tensor4D;
         continue;
       }
 
       if (block.kind === 'gpool') {
         const a = bnAct(trunk, block.preBN, block.preActivation);
-        let regularOut = conv2d(a, block.w1a, wrapRows);
-        const gpoolOut = conv2d(a, block.w1b, wrapRows);
+        let regularOut = conv2d(a, block.w1a, topology);
+        const gpoolOut = conv2d(a, block.w1b, topology);
         const gpoolOut2 = bnAct(gpoolOut, block.gpoolBN, block.gpoolActivation);
         const gpoolConcat = poolRowsGPool(gpoolOut2);
         const gpoolBias = tf.matMul(gpoolConcat, block.w1r.w) as tf.Tensor2D;
         regularOut = regularOut.add(gpoolBias.reshape([gpoolBias.shape[0], 1, 1, gpoolBias.shape[1]])) as tf.Tensor4D;
         const c = bnAct(regularOut, block.midBN, block.midActivation);
-        const d = conv2d(c, block.w2, wrapRows);
+        const d = conv2d(c, block.w2, topology);
         trunk = trunk.add(d) as tf.Tensor4D;
         continue;
       }
 
       // nested_bottleneck
       const a = bnAct(trunk, block.preBN, block.preActivation);
-      let mid = conv2d(a, block.preConv, wrapRows);
-      mid = this.applyBlockStack(mid, block.blocks, wrapRows);
+      let mid = conv2d(a, block.preConv, topology);
+      mid = this.applyBlockStack(mid, block.blocks, topology);
       const c = bnAct(mid, block.postBN, block.postActivation);
-      const d = conv2d(c, block.postConv, wrapRows);
+      const d = conv2d(c, block.postConv, topology);
       trunk = trunk.add(d) as tf.Tensor4D;
     }
     return trunk;

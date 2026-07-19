@@ -4,6 +4,7 @@ import {
   PHASE_PLAY,
   PHASE_SCORING,
   TOPOLOGY_CYLINDER,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
   WHITE,
 } from "../game/goEngine.js";
@@ -26,7 +27,11 @@ const SERIALIZED_SCHEMA_VERSION = 1;
 const TOKEN_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const VALID_COLORS = new Set([BLACK, WHITE]);
 const VALID_SCORING_RULES = new Set(["japanese", "chinese"]);
-const VALID_TOPOLOGIES = new Set([TOPOLOGY_CYLINDER, TOPOLOGY_TORUS]);
+const VALID_TOPOLOGIES = new Set([
+  TOPOLOGY_CYLINDER,
+  TOPOLOGY_TORUS,
+  TOPOLOGY_MOBIUS,
+]);
 
 const GAME_ERROR_MESSAGES = Object.freeze({
   game_not_playing: "当前阶段不能落子或停一手。",

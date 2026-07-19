@@ -9,6 +9,7 @@ import {
   PHASE_SCORING,
   SCORING_CHINESE,
   TOPOLOGY_CYLINDER,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
 } from "./game/goEngine.js";
 import {
@@ -30,6 +31,7 @@ import { CylinderBoard } from "./view/CylinderBoard.js";
 import { FlatBoard } from "./view/FlatBoard.js";
 import { ArcBoard } from "./view/ArcBoard.js";
 import { TorusBoard } from "./view/TorusBoard.js";
+import { MobiusBoard } from "./view/MobiusBoard.js";
 import { RoomClient, CONNECTION_STATUS } from "./multiplayer/roomClient.js";
 import {
   CHAT_STICKERS,
@@ -47,6 +49,7 @@ const elements = {
   boardStage: $(".board-stage"),
   scene: $("#scene"),
   torusScene: $("#torus-scene"),
+  mobiusScene: $("#mobius-scene"),
   flatScene: $("#flat-scene"),
   arcScene: $("#arc-scene"),
   toggleSound: $("#toggle-sound"),
@@ -114,6 +117,7 @@ const elements = {
   rulesSummary: $("#rules-summary"),
   cylinderRules: $("#cylinder-rules"),
   torusRules: $("#torus-rules"),
+  mobiusRules: $("#mobius-rules"),
   coordinateHint: $("#coordinate-hint"),
   newGameDialog: $("#new-game-dialog"),
   newGameSummary: $("#new-game-summary"),
@@ -187,6 +191,7 @@ const ERROR_MESSAGES = {
 let game;
 let cylinderView;
 let torusView;
+let mobiusView;
 let flatView;
 let arcView;
 let activeViewMode = "arc";
@@ -307,12 +312,22 @@ function isTorusTopology(topology = game?.topology) {
   return topology === TOPOLOGY_TORUS;
 }
 
+function isMobiusTopology(topology = game?.topology) {
+  return topology === TOPOLOGY_MOBIUS;
+}
+
+function isCylinderTopology(topology = game?.topology) {
+  return !isTorusTopology(topology) && !isMobiusTopology(topology);
+}
+
 function topologyName(topology = game?.topology) {
-  return isTorusTopology(topology) ? "甜甜圈" : "竹筒";
+  if (isTorusTopology(topology)) return "甜甜圈";
+  if (isMobiusTopology(topology)) return "莫比乌斯";
+  return "竹筒";
 }
 
 function topologySurfaceName(topology = game?.topology) {
-  return isTorusTopology(topology) ? "甜甜圈" : "竹筒";
+  return topologyName(topology);
 }
 
 function formatScore(value) {
@@ -391,7 +406,9 @@ function currentChatMessages() {
 function activeBoardView() {
   if (activeViewMode === "flat") return flatView;
   if (activeViewMode === "arc") return arcView;
-  return isTorusTopology() ? torusView : cylinderView;
+  if (isTorusTopology()) return torusView;
+  if (isMobiusTopology()) return mobiusView;
+  return cylinderView;
 }
 
 function syncReferenceFocusRotationState() {
@@ -1418,6 +1435,7 @@ function syncMovePreviewAvailability() {
   const enabled = canShowMovePreview();
   cylinderView?.setMovePreviewEnabled(enabled);
   torusView?.setMovePreviewEnabled(enabled);
+  mobiusView?.setMovePreviewEnabled(enabled);
   flatView?.setMovePreviewEnabled(enabled);
   arcView?.setMovePreviewEnabled(enabled);
 }
@@ -1715,30 +1733,42 @@ function rememberOfflineGame() {
 
 function syncTopologyPresentation() {
   const torus = isTorusTopology();
+  const mobius = isMobiusTopology();
+  const cylinder = isCylinderTopology();
   elements.boardStage.dataset.topology = game.topology;
   elements.boardStage.setAttribute(
     "aria-label",
-    torus ? "上下左右相连的甜甜圈围棋棋盘区域" : "左右相连的竹筒围棋棋盘区域",
+    torus
+      ? "上下左右相连的甜甜圈围棋棋盘区域"
+      : mobius
+        ? "左右反向相连、上下保留边界的莫比乌斯围棋棋盘区域"
+        : "左右相连的竹筒围棋棋盘区域",
   );
   elements.flatScene.setAttribute(
     "aria-label",
     torus
       ? "可向任意方向循环滑动的甜甜圈平面展开棋盘"
-      : "可横向滑动的竹筒表面平面展开棋盘",
+      : mobius
+        ? "可横向滑动、跨一圈后上下翻转的莫比乌斯平面展开棋盘"
+        : "可横向滑动的竹筒表面平面展开棋盘",
   );
-  elements.arcViewButton.hidden = torus;
-  elements.threeDViewLabel.textContent = torus ? "立体甜甜圈" : "立体竹筒";
-  elements.rulesSummary.textContent = torus
-    ? "甜甜圈棋盘规则说明"
-    : "竹筒表面规则说明";
-  elements.cylinderRules.hidden = torus;
+  elements.arcViewButton.hidden = !cylinder;
+  elements.threeDViewLabel.textContent = torus
+    ? "立体甜甜圈"
+    : mobius
+      ? "立体莫比乌斯"
+      : "立体竹筒";
+  elements.rulesSummary.textContent = `${topologyName()}棋盘规则说明`;
+  elements.cylinderRules.hidden = !cylinder;
   elements.torusRules.hidden = !torus;
-  setViewMode(torus && activeViewMode === "arc" ? "flat" : activeViewMode);
+  elements.mobiusRules.hidden = !mobius;
+  setViewMode(!cylinder && activeViewMode === "arc" ? "flat" : activeViewMode);
 }
 
 function rebuildViews(size, topology) {
   cylinderView?.rebuild(size);
   torusView?.rebuild(size);
+  mobiusView?.rebuild(size);
   flatView?.rebuild(size, topology);
   arcView?.rebuild(size);
   syncTopologyPresentation();
@@ -1948,8 +1978,12 @@ function setPendingSize(size) {
 }
 
 function setPendingTopology(topology) {
-  pendingTopology = topology === TOPOLOGY_TORUS
-    ? TOPOLOGY_TORUS
+  pendingTopology = [
+    TOPOLOGY_CYLINDER,
+    TOPOLOGY_TORUS,
+    TOPOLOGY_MOBIUS,
+  ].includes(topology)
+    ? topology
     : TOPOLOGY_CYLINDER;
   for (const button of elements.topologyButtons) {
     const active = button.dataset.boardTopology === pendingTopology;
@@ -2013,7 +2047,9 @@ function requestNewGame() {
   }
   elements.newGameSummary.textContent = pendingTopology === TOPOLOGY_TORUS
     ? `将建立：甜甜圈（上下左右首尾相接） · ${pendingSize} 路。当前对局进度将被清除。`
-    : `将建立：竹筒（左右首尾相接） · ${pendingSize} 路。当前对局进度将被清除。`;
+    : pendingTopology === TOPOLOGY_MOBIUS
+      ? `将建立：莫比乌斯（左右反向相接，上下保留一圈边界） · ${pendingSize} 路。当前对局进度将被清除。`
+      : `将建立：竹筒（左右首尾相接） · ${pendingSize} 路。当前对局进度将被清除。`;
   if (typeof elements.newGameDialog.showModal === "function") {
     elements.newGameDialog.showModal();
   } else {
@@ -2048,6 +2084,7 @@ function renderBoardPosition(
   const viewState = { ...state, lastMove, analysisMove, referencePoint };
   cylinderView?.setPosition(viewState);
   torusView?.setPosition(viewState);
+  mobiusView?.setPosition(viewState);
   flatView?.setPosition(viewState);
   arcView?.setPosition(viewState);
 }
@@ -2205,9 +2242,9 @@ function updateReplayUI() {
   syncAIReviewUI();
 
   updateRoomUI();
-  const availableViewCopy = frame.topology === TOPOLOGY_TORUS
-    ? "平面或立体视图"
-    : "平面、弧面或立体视图";
+  const availableViewCopy = frame.topology === TOPOLOGY_CYLINDER
+    ? "平面、弧面或立体视图"
+    : "平面或立体视图";
   const replayNote = replaySession.complete
     ? `可随时切换${availableViewCopy}。`
     : "旧棋局只记录了升级后的棋步；仍可切换任意可用视图。";
@@ -2425,13 +2462,23 @@ function handleHover(point) {
   const coordinate = `${letter}${game.size - point.row}`;
   const seamNotes = [];
   if (point.col === 0 || point.col === game.size - 1) {
-    seamNotes.push("A列与末列相邻");
+    seamNotes.push(
+      isMobiusTopology()
+        ? "A列与末列倒序相邻"
+        : "A列与末列相邻",
+    );
   }
   if (
     isTorusTopology() &&
     (point.row === 0 || point.row === game.size - 1)
   ) {
     seamNotes.push("最上行与最下行相邻");
+  }
+  if (
+    isMobiusTopology() &&
+    (point.row === 0 || point.row === game.size - 1)
+  ) {
+    seamNotes.push("莫比乌斯唯一边界");
   }
   elements.coordinateHint.textContent =
     `${coordinate}${seamNotes.length ? ` · ${seamNotes.join(" · ")}` : ""}${
@@ -2580,8 +2627,13 @@ for (const button of elements.sizeButtons) {
 
 for (const button of elements.topologyButtons) {
   button.addEventListener("click", () => {
-    const nextTopology = button.dataset.boardTopology === TOPOLOGY_TORUS
-      ? TOPOLOGY_TORUS
+    const requestedTopology = button.dataset.boardTopology;
+    const nextTopology = [
+      TOPOLOGY_CYLINDER,
+      TOPOLOGY_TORUS,
+      TOPOLOGY_MOBIUS,
+    ].includes(requestedTopology)
+      ? requestedTopology
       : TOPOLOGY_CYLINDER;
     if (nextTopology === game.topology) {
       setPendingTopology(game.topology);
@@ -2616,30 +2668,38 @@ elements.newGameDialog.addEventListener("close", () => {
 
 function setViewMode(mode) {
   const torus = isTorusTopology();
-  const availableModes = torus ? ["flat", "3d"] : ["flat", "arc", "3d"];
+  const mobius = isMobiusTopology();
+  const cylinder = isCylinderTopology();
+  const availableModes = cylinder
+    ? ["flat", "arc", "3d"]
+    : ["flat", "3d"];
   activeViewMode = availableModes.includes(mode)
     ? mode
-    : torus
+    : !cylinder
       ? "flat"
       : "arc";
   const flatActive = activeViewMode === "flat";
-  const arcActive = !torus && activeViewMode === "arc";
-  const cylinderActive = !torus && activeViewMode === "3d";
+  const arcActive = cylinder && activeViewMode === "arc";
+  const cylinderActive = cylinder && activeViewMode === "3d";
   const torusActive = torus && activeViewMode === "3d";
+  const mobiusActive = mobius && activeViewMode === "3d";
   elements.boardStage.dataset.viewMode = activeViewMode;
   elements.flatScene.hidden = !flatActive;
   elements.arcScene.hidden = !arcActive;
   elements.scene.hidden = !cylinderActive;
   elements.torusScene.hidden = !torusActive;
+  elements.mobiusScene.hidden = !mobiusActive;
   flatView?.setActive(flatActive);
   arcView?.setActive(arcActive);
   cylinderView?.setActive(cylinderActive);
   torusView?.setActive(torusActive);
+  mobiusView?.setActive(mobiusActive);
   if (arcActive) arcView?.setAutoRotate(autoRotateByView.arc);
   if (cylinderActive) {
     cylinderView?.setAutoRotate(autoRotateByView["3d"]);
   }
   if (torusActive) torusView?.setAutoRotate(autoRotateByView["3d"]);
+  if (mobiusActive) mobiusView?.setAutoRotate(autoRotateByView["3d"]);
 
   for (const button of elements.viewButtons) {
     const active = button.dataset.viewMode === activeViewMode;
@@ -2655,6 +2715,13 @@ function setViewMode(mode) {
           primaryGesture: "任意方向拖动",
           secondaryGesture: "上下左右循环 · 支持斜向",
         }
+      : mobius
+        ? {
+            resetIcon: "↤",
+            resetLabel: "重置展开",
+            primaryGesture: "横向拖动",
+            secondaryGesture: "跨一圈上下翻转 · 两圈复位",
+          }
       : {
           resetIcon: "↤",
           resetLabel: "重置展开",
@@ -2670,11 +2737,17 @@ function setViewMode(mode) {
         }
       : {
           resetIcon: "◎",
-          resetLabel: torus ? "回正甜甜圈" : "回正视角",
+          resetLabel: torus
+            ? "回正甜甜圈"
+            : mobius
+              ? "回正莫比乌斯"
+              : "回正视角",
           primaryGesture: "拖动旋转",
           secondaryGesture: torus
             ? "观察内圈与背面 · 滚轮缩放"
-            : "滚轮缩放",
+            : mobius
+              ? "观察单面扭转与唯一边界 · 滚轮缩放"
+              : "滚轮缩放",
         };
 
   elements.toggleRotation.hidden = flatActive;
@@ -2701,19 +2774,14 @@ for (const button of elements.viewButtons) {
 }
 
 elements.resetView.addEventListener("click", () => {
-  if (activeViewMode === "flat") flatView.resetView();
-  else if (activeViewMode === "arc") arcView.resetView();
-  else if (isTorusTopology()) torusView.resetView();
-  else cylinderView.resetView();
+  activeBoardView()?.resetView();
 });
 elements.toggleRotation.addEventListener("click", () => {
   if (activeViewMode === "flat") return;
   const active = !autoRotateByView[activeViewMode];
   autoRotateByView[activeViewMode] = active;
   elements.toggleRotation.setAttribute("aria-pressed", String(active));
-  if (activeViewMode === "arc") arcView.setAutoRotate(active);
-  else if (isTorusTopology()) torusView.setAutoRotate(active);
-  else cylinderView.setAutoRotate(active);
+  activeBoardView()?.setAutoRotate?.(active);
 });
 
 function normalizedPlayerName() {
@@ -2990,6 +3058,11 @@ torusView = new TorusBoard(elements.torusScene, {
   onPoint: handleBoardPoint,
   onHover: handleHover,
 });
+mobiusView = new MobiusBoard(elements.mobiusScene, {
+  size: game.size,
+  onPoint: handleBoardPoint,
+  onHover: handleHover,
+});
 flatView = new FlatBoard(elements.flatScene, {
   size: game.size,
   topology: game.topology,
@@ -3032,6 +3105,7 @@ window.addEventListener(
     cancelAIThinking();
     cylinderView.destroy();
     torusView.destroy();
+    mobiusView.destroy();
     flatView.destroy();
     arcView.destroy();
     roomClient.destroy();

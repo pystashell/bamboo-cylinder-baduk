@@ -1,3 +1,8 @@
+import {
+  mobiusPointFromCover,
+  mobiusPointInCopy,
+} from "../game/mobiusTopology.js";
+
 const TAU = Math.PI * 2;
 const DRAG_THRESHOLD = 6;
 const COORDINATE_LETTERS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
@@ -11,7 +16,9 @@ function clamp(value, minimum, maximum) {
 }
 
 function normalizeTopology(topology) {
-  return topology === "torus" ? "torus" : "cylinder";
+  return ["cylinder", "torus", "mobius"].includes(topology)
+    ? topology
+    : "cylinder";
 }
 
 function starIndices(size) {
@@ -36,6 +43,7 @@ export class FlatBoard {
     this.size = size;
     this.topology = normalizeTopology(topology);
     this.wrapRows = this.topology === "torus";
+    this.isMobius = this.topology === "mobius";
     this.board = [];
     this.currentPlayer = "black";
     this.phase = "play";
@@ -83,11 +91,14 @@ export class FlatBoard {
     this.size = size;
     this.topology = normalizeTopology(topology);
     this.wrapRows = this.topology === "torus";
+    this.isMobius = this.topology === "mobius";
     this.container.dataset.topology = this.topology;
     this.canvas.setAttribute(
       "aria-label",
       this.wrapRows
         ? "甜甜圈围棋的平面展开视图。上下、左右分别首尾相接，可向任意方向拖动改变展开起点。"
+        : this.isMobius
+          ? "莫比乌斯围棋的平面展开视图。左右反向相接，横向滑过一圈后棋盘会上下翻转。"
         : "竹筒围棋的平面展开视图。左右两侧首尾相接，可横向拖动改变展开起点。",
     );
     this.board = Array.from({ length: size }, () => Array(size).fill(null));
@@ -158,6 +169,10 @@ export class FlatBoard {
     this.animateOffsetTo(0, 0);
   }
 
+  horizontalPeriod() {
+    return this.isMobius ? this.size * 2 : this.size;
+  }
+
   focusPoint(point) {
     if (
       !Number.isInteger(point?.row) ||
@@ -170,8 +185,21 @@ export class FlatBoard {
       return;
     }
     const centeredOffset = (this.size - 1) / 2;
+    let targetColumns = centeredOffset - point.col;
+    if (this.isMobius) {
+      const candidates = [];
+      for (let copy = -2; copy <= 3; copy += 1) {
+        candidates.push(targetColumns + copy * this.size);
+      }
+      targetColumns = candidates.reduce((nearest, candidate) =>
+        Math.abs(candidate - this.offsetColumns) <
+        Math.abs(nearest - this.offsetColumns)
+          ? candidate
+          : nearest,
+      );
+    }
     this.animateOffsetTo(
-      centeredOffset - point.col,
+      targetColumns,
       this.wrapRows ? centeredOffset - point.row : 0,
     );
   }
@@ -219,6 +247,39 @@ export class FlatBoard {
     return this.frameY + visualRow * this.cell;
   }
 
+  forEachLogicalPoint(row, col, radius, callback) {
+    if (!this.isMobius) {
+      this.forEachWrappedPoint(
+        this.pointX(col),
+        this.pointY(row),
+        radius,
+        callback,
+      );
+      return;
+    }
+
+    const baseColumn = col + this.offsetColumns;
+    const firstCopy = Math.floor((-0.5 - baseColumn) / this.size) - 1;
+    for (let copyIndex = firstCopy; copyIndex <= firstCopy + 4; copyIndex += 1) {
+      const image = mobiusPointInCopy(
+        row,
+        col,
+        copyIndex,
+        this.size,
+      );
+      const x =
+        this.frameX +
+        (image.coverColumn + this.offsetColumns + 0.5) * this.cell;
+      const y = this.frameY + (image.row + 0.5) * this.cell;
+      if (
+        x + radius >= this.frameX &&
+        x - radius <= this.frameX + this.boardPixels
+      ) {
+        callback(x, y, copyIndex);
+      }
+    }
+  }
+
   hitPoint(clientX, clientY) {
     const rect = this.canvas.getBoundingClientRect();
     const x = clientX - rect.left;
@@ -233,9 +294,31 @@ export class FlatBoard {
     }
 
     const visualColumn = (x - this.frameX) / this.cell - 0.5;
+    const visualRow = (y - this.frameY) / this.cell - 0.5;
+    if (this.isMobius) {
+      const coverColumn = Math.round(visualColumn - this.offsetColumns);
+      const roundedVisualRow = Math.round(visualRow);
+      if (roundedVisualRow < 0 || roundedVisualRow >= this.size) return null;
+      const point = mobiusPointFromCover(
+        roundedVisualRow,
+        coverColumn,
+        this.size,
+      );
+      const nearestX =
+        this.frameX +
+        (coverColumn + this.offsetColumns + 0.5) * this.cell;
+      const nearestY =
+        this.frameY + (roundedVisualRow + 0.5) * this.cell;
+      if (
+        Math.abs(x - nearestX) > this.cell * 0.48 ||
+        Math.abs(y - nearestY) > this.cell * 0.48
+      ) {
+        return null;
+      }
+      return { row: point.row, col: point.col };
+    }
     const logicalColumn = Math.round(visualColumn - this.offsetColumns);
     const col = mod(logicalColumn, this.size);
-    const visualRow = (y - this.frameY) / this.cell - 0.5;
     const logicalRow = Math.round(
       visualRow - (this.wrapRows ? this.offsetRows : 0),
     );
@@ -301,7 +384,7 @@ export class FlatBoard {
         this.container.classList.add("dragging");
         this.offsetColumns = mod(
           pointer.startColumnOffset + deltaX / this.cell,
-          this.size,
+          this.horizontalPeriod(),
         );
         if (this.wrapRows) {
           this.offsetRows = mod(
@@ -337,7 +420,7 @@ export class FlatBoard {
       if (!pointer.moved) {
         this.offsetColumns = mod(
           pointer.startColumnOffset + deltaX / this.cell,
-          this.size,
+          this.horizontalPeriod(),
         );
         if (this.wrapRows) {
           this.offsetRows = mod(
@@ -391,11 +474,12 @@ export class FlatBoard {
     const startRows = this.offsetRows;
     let adjustedColumns = targetColumns;
     let adjustedRows = this.wrapRows ? targetRows : 0;
-    while (adjustedColumns - startColumns > this.size / 2) {
-      adjustedColumns -= this.size;
+    const horizontalPeriod = this.horizontalPeriod();
+    while (adjustedColumns - startColumns > horizontalPeriod / 2) {
+      adjustedColumns -= horizontalPeriod;
     }
-    while (adjustedColumns - startColumns < -this.size / 2) {
-      adjustedColumns += this.size;
+    while (adjustedColumns - startColumns < -horizontalPeriod / 2) {
+      adjustedColumns += horizontalPeriod;
     }
     while (adjustedRows - startRows > this.size / 2) adjustedRows -= this.size;
     while (adjustedRows - startRows < -this.size / 2) adjustedRows += this.size;
@@ -417,7 +501,7 @@ export class FlatBoard {
       if (progress < 1) {
         this.snapFrame = requestAnimationFrame(step);
       } else {
-        this.offsetColumns = mod(adjustedColumns, this.size);
+        this.offsetColumns = mod(adjustedColumns, horizontalPeriod);
         this.offsetRows = this.wrapRows ? mod(adjustedRows, this.size) : 0;
         this.snapFrame = null;
         this.draw();
@@ -438,9 +522,19 @@ export class FlatBoard {
     const startRow = this.wrapRows
       ? mod(-Math.round(this.offsetRows), this.size)
       : 0;
+    const flipped = this.isMobius &&
+      mod(
+        mobiusPointFromCover(
+          0,
+          -Math.round(this.offsetColumns),
+          this.size,
+        ).copyIndex,
+        2,
+      ) === 1;
     this.onPan({
       startCol,
       startRow,
+      flipped,
       offsetColumns: this.offsetColumns,
       offsetRows: this.offsetRows,
     });
@@ -540,9 +634,9 @@ export class FlatBoard {
     const radius = clamp(this.cell * 0.105, 1.7, 4.2);
     for (const row of stars) {
       for (const col of stars) {
-        this.forEachWrappedPoint(
-          this.pointX(col),
-          this.pointY(row),
+        this.forEachLogicalPoint(
+          row,
+          col,
           radius,
           (x, y) => {
             context.beginPath();
@@ -603,9 +697,9 @@ export class FlatBoard {
         const color = this.board[row]?.[col];
         if (!color) continue;
         const dead = this.deadKeys.has(`${row},${col}`);
-        this.forEachWrappedPoint(
-          this.pointX(col),
-          this.pointY(row),
+        this.forEachLogicalPoint(
+          row,
+          col,
           radius,
           (x, y) => {
             this.drawStone(context, x, y, radius, color, dead);
@@ -691,9 +785,9 @@ export class FlatBoard {
     context.beginPath();
     context.rect(this.frameX, this.frameY, this.boardPixels, this.boardPixels);
     context.clip();
-    this.forEachWrappedPoint(
-      this.pointX(move.col),
-      this.pointY(move.row),
+    this.forEachLogicalPoint(
+      move.row,
+      move.col,
       radius,
       (x, y) => {
         context.save();
@@ -740,9 +834,9 @@ export class FlatBoard {
     context.beginPath();
     context.rect(this.frameX, this.frameY, this.boardPixels, this.boardPixels);
     context.clip();
-    this.forEachWrappedPoint(
-      this.pointX(point.col),
-      this.pointY(point.row),
+    this.forEachLogicalPoint(
+      point.row,
+      point.col,
       radius + 3,
       (x, y) => {
         context.save();
@@ -793,9 +887,9 @@ export class FlatBoard {
     context.rect(this.frameX, this.frameY, this.boardPixels, this.boardPixels);
     context.clip();
     context.globalAlpha = 0.48;
-    this.forEachWrappedPoint(
-      this.pointX(point.col),
-      this.pointY(point.row),
+    this.forEachLogicalPoint(
+      point.row,
+      point.col,
       radius,
       (x, y) => {
         this.drawStone(
@@ -814,6 +908,10 @@ export class FlatBoard {
   drawSeam(context) {
     if (this.wrapRows) {
       this.drawTorusSeam(context);
+      return;
+    }
+    if (this.isMobius) {
+      this.drawMobiusSeam(context);
       return;
     }
     const left = this.frameX;
@@ -879,6 +977,88 @@ export class FlatBoard {
     context.moveTo(left, bottom);
     context.lineTo(right, bottom);
     context.stroke();
+    context.restore();
+  }
+
+  drawMobiusSeam(context) {
+    const left = this.frameX;
+    const right = this.frameX + this.boardPixels;
+    const top = this.frameY;
+    const bottom = this.frameY + this.boardPixels;
+    const accent = "rgba(230, 185, 105, 0.98)";
+
+    context.save();
+    const leftGlow = context.createLinearGradient(left, 0, left + 20, 0);
+    leftGlow.addColorStop(0, "rgba(230, 185, 105, 0.28)");
+    leftGlow.addColorStop(1, "rgba(230, 185, 105, 0)");
+    context.fillStyle = leftGlow;
+    context.fillRect(left, top, 20, this.boardPixels);
+    const rightGlow = context.createLinearGradient(right - 20, 0, right, 0);
+    rightGlow.addColorStop(0, "rgba(230, 185, 105, 0)");
+    rightGlow.addColorStop(1, "rgba(230, 185, 105, 0.28)");
+    context.fillStyle = rightGlow;
+    context.fillRect(right - 20, top, 20, this.boardPixels);
+
+    context.strokeStyle = accent;
+    context.lineWidth = 2;
+    context.setLineDash([6, 6]);
+    for (const x of [left, right]) {
+      context.beginPath();
+      context.moveTo(x, top);
+      context.lineTo(x, bottom);
+      context.stroke();
+    }
+    context.setLineDash([]);
+
+    const arrowInset = Math.max(18, this.cell * 0.8);
+    context.fillStyle = accent;
+    context.beginPath();
+    context.moveTo(left, top + arrowInset);
+    context.lineTo(left - 5, top + arrowInset + 9);
+    context.lineTo(left + 5, top + arrowInset + 9);
+    context.closePath();
+    context.fill();
+    context.beginPath();
+    context.moveTo(right, bottom - arrowInset);
+    context.lineTo(right - 5, bottom - arrowInset - 9);
+    context.lineTo(right + 5, bottom - arrowInset - 9);
+    context.closePath();
+    context.fill();
+
+    context.strokeStyle = "rgba(50, 30, 18, 0.84)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.moveTo(left, top);
+    context.lineTo(right, top);
+    context.moveTo(left, bottom);
+    context.lineTo(right, bottom);
+    context.stroke();
+
+    const labelSize = clamp(this.cell * 0.3, 10, 13);
+    context.font = `500 ${labelSize}px Inter, "Microsoft YaHei", sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = "rgba(228, 233, 229, 0.86)";
+    if (this.width >= 560) {
+      context.fillText(
+        "↕ 左右反向相接 · 横向一圈后上下翻转",
+        (left + right) / 2,
+        top - 30,
+      );
+    }
+
+    context.fillStyle = accent;
+    context.font = `500 ${clamp(labelSize * 0.9, 9, 11)}px Inter, "Microsoft YaHei", sans-serif`;
+    context.save();
+    context.translate(left - 20, (top + bottom) / 2);
+    context.rotate(-Math.PI / 2);
+    context.fillText("与右侧倒序相接", 0, 0);
+    context.restore();
+    context.save();
+    context.translate(right + 20, (top + bottom) / 2);
+    context.rotate(Math.PI / 2);
+    context.fillText("与左侧倒序相接", 0, 0);
+    context.restore();
     context.restore();
   }
 
@@ -974,6 +1154,36 @@ export class FlatBoard {
         context.fillText(label, this.frameX - 9, y);
         context.textAlign = "left";
         context.fillText(label, this.frameX + this.boardPixels + 9, y);
+      }
+    } else if (this.isMobius) {
+      const leftCoverColumn = Math.round(-this.offsetColumns);
+      const rightCoverColumn = Math.round(
+        this.size - 1 - this.offsetColumns,
+      );
+      for (let visualRow = 0; visualRow < this.size; visualRow += 1) {
+        const y = this.frameY + (visualRow + 0.5) * this.cell;
+        const leftPoint = mobiusPointFromCover(
+          visualRow,
+          leftCoverColumn,
+          this.size,
+        );
+        const rightPoint = mobiusPointFromCover(
+          visualRow,
+          rightCoverColumn,
+          this.size,
+        );
+        context.textAlign = "right";
+        context.fillText(
+          String(this.size - leftPoint.row),
+          this.frameX - 9,
+          y,
+        );
+        context.textAlign = "left";
+        context.fillText(
+          String(this.size - rightPoint.row),
+          this.frameX + this.boardPixels + 9,
+          y,
+        );
       }
     }
     context.restore();

@@ -19,7 +19,7 @@ export const CHAT_STICKERS = Object.freeze([
 ]);
 
 const CHAT_STICKER_IDS = new Set(CHAT_STICKERS.map(({ id }) => id));
-const VALID_TOPOLOGIES = new Set(["cylinder", "torus"]);
+const VALID_TOPOLOGIES = new Set(["cylinder", "torus", "mobius"]);
 const textEncoder = new TextEncoder();
 
 export class ChatValidationError extends Error {

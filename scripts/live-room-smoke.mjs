@@ -1,4 +1,8 @@
 import { RoomClient } from "../src/multiplayer/roomClient.js";
+import {
+  BADUK_PROTOCOL_VERSION,
+  BADUK_WS_PROTOCOL,
+} from "../src/multiplayer/protocol.js";
 
 const target = new URL(
   process.argv[2] ?? "http://127.0.0.1:8787/",
@@ -30,7 +34,7 @@ function makeClient() {
 
 function isRestoredAfterWhiteUndo({ room }) {
   return (
-    room?.game?.topology === "torus" &&
+    room?.game?.topology === "mobius" &&
     room?.moveCount === 1 &&
     room?.game?.moveCount === 1 &&
     room?.game?.board?.[0]?.[0] === "black" &&
@@ -57,6 +61,17 @@ const black = makeClient();
 const white = makeClient();
 
 try {
+  const legacyResponse = await fetch(new URL("/api/rooms", target), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ v: 1, name: "Stale Protocol Probe" }),
+  });
+  const legacyPayload = await legacyResponse.json();
+  requireCondition(
+    legacyResponse.status === 400 && /刷新页面/u.test(legacyPayload.error ?? ""),
+    "Legacy HTTP clients were not rejected with a refresh instruction",
+  );
+
   const blackConnected = waitFor(
     black,
     "connection",
@@ -68,7 +83,7 @@ try {
     size: 9,
     komi: 6.5,
     scoringRule: "japanese",
-    topology: "torus",
+    topology: "mobius",
   });
   await blackConnected;
 
@@ -84,13 +99,19 @@ try {
   await whiteConnected;
 
   requireCondition(
+    black._socket?.protocol === BADUK_WS_PROTOCOL &&
+      white._socket?.protocol === BADUK_WS_PROTOCOL,
+    "Clients did not negotiate the v2 WebSocket subprotocol",
+  );
+
+  requireCondition(
     created.color === "black" && joined.color === "white",
     "Room seats were not assigned black then white",
   );
   requireCondition(
-    created.room?.game?.topology === "torus" &&
-      joined.room?.game?.topology === "torus",
-    "Torus topology was not preserved across room creation and join",
+    created.room?.game?.topology === "mobius" &&
+      joined.room?.game?.topology === "mobius",
+    "Mobius topology was not preserved across room creation and join",
   );
 
   const uncensoredText = "讨论 D4：<script>alert('still text')</script> 👨‍👩‍👧‍👦";
@@ -230,6 +251,9 @@ try {
       black: created.color,
       white: joined.color,
       topology: blackFinal.room.game.topology,
+      protocolVersion: BADUK_PROTOCOL_VERSION,
+      webSocketProtocol: black._socket?.protocol,
+      legacyClientRejected: true,
       moveCountBeforeUndo: beforeUndo.room.moveCount,
       moveCount: blackFinal.room.moveCount,
       undoRequestRevision: requestRevision,

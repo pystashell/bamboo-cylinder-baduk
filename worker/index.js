@@ -102,7 +102,7 @@ function sessionBody(identity, token, room) {
 async function createRoom(request, env) {
   const body = await readJsonBody(request);
   if (!isRecord(body)) return jsonResponse({ error: "无法识别建房请求。" }, 400);
-  if (body.v !== undefined && body.v !== BADUK_PROTOCOL_VERSION) {
+  if (body.v !== BADUK_PROTOCOL_VERSION) {
     return jsonResponse({ error: "客户端协议版本不兼容，请刷新页面。" }, 400);
   }
   const name = normalizeName(body.name);
@@ -152,7 +152,7 @@ async function createRoom(request, env) {
 async function joinRoom(request, env, roomCode) {
   const body = await readJsonBody(request);
   if (!isRecord(body)) return jsonResponse({ error: "无法识别加入请求。" }, 400);
-  if (body.v !== undefined && body.v !== BADUK_PROTOCOL_VERSION) {
+  if (body.v !== BADUK_PROTOCOL_VERSION) {
     return jsonResponse({ error: "客户端协议版本不兼容，请刷新页面。" }, 400);
   }
   const name = normalizeName(body.name);

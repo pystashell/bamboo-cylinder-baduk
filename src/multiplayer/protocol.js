@@ -1,6 +1,7 @@
-export const BADUK_PROTOCOL_VERSION = 1;
-export const BADUK_WS_PROTOCOL = "bamboo-baduk";
+export const BADUK_PROTOCOL_VERSION = 2;
+export const BADUK_WS_PROTOCOL = "bamboo-baduk-v2";
 export const LEGACY_BADUK_WS_PROTOCOL = "bamboo-baduk-v1";
+export const UNVERSIONED_BADUK_WS_PROTOCOL = "bamboo-baduk";
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
 export const ROOM_ACTIONS = Object.freeze([
@@ -51,7 +52,7 @@ export function isRoomColor(value) {
 export function normalizeCommandMessage(value) {
   if (
     !isRecord(value) ||
-    (value.v !== undefined && value.v !== BADUK_PROTOCOL_VERSION) ||
+    value.v !== BADUK_PROTOCOL_VERSION ||
     value.type !== "command" ||
     typeof value.id !== "string" ||
     value.id.length < 1 ||
@@ -166,8 +167,8 @@ function decodeBase64Url(value) {
 
 /**
  * Read the application protocol and reconnect token from a WebSocket
- * Sec-WebSocket-Protocol header.  Both the current raw-token pair
- * (`bamboo-baduk, <token>`) and `token.<base64url>` are accepted.
+ * Sec-WebSocket-Protocol header. Legacy names are still recognized so the
+ * room endpoint can reject stale tabs before sending them a v2 room snapshot.
  */
 export function parseWebSocketProtocols(headerValue) {
   const offered = String(headerValue ?? "")
@@ -179,13 +180,17 @@ export function parseWebSocketProtocols(headerValue) {
     ? BADUK_WS_PROTOCOL
     : offered.includes(LEGACY_BADUK_WS_PROTOCOL)
       ? LEGACY_BADUK_WS_PROTOCOL
-      : null;
+      : offered.includes(UNVERSIONED_BADUK_WS_PROTOCOL)
+        ? UNVERSIONED_BADUK_WS_PROTOCOL
+        : null;
 
   if (!protocol) return { protocol: null, token: null };
 
   const tokenPart = offered.find(
     (value) =>
-      value !== BADUK_WS_PROTOCOL && value !== LEGACY_BADUK_WS_PROTOCOL,
+      value !== BADUK_WS_PROTOCOL &&
+      value !== LEGACY_BADUK_WS_PROTOCOL &&
+      value !== UNVERSIONED_BADUK_WS_PROTOCOL,
   );
   if (!tokenPart) return { protocol, token: null };
 

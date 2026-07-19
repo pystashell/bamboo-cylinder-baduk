@@ -13,6 +13,7 @@ import {
   EMPTY,
   GoEngine,
   TOPOLOGY_CYLINDER,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
   WHITE,
 } from "../src/game/goEngine.js";
@@ -147,6 +148,34 @@ test("KataGo legal mask uses the torus top-bottom capture seam", () => {
   const played = torus.play(4, 2);
   assert.equal(played.ok, true);
   assert.deepEqual(played.captured, [{ row: 0, col: 2 }]);
+});
+
+test("KataGo legal mask uses the reversed Mobius seam", () => {
+  const initialBoard = boardFromRows([
+    "W....",
+    ".W...",
+    "W....",
+    "....W",
+    ".....",
+  ]);
+  const mobius = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_MOBIUS,
+    currentPlayer: BLACK,
+    initialBoard,
+  });
+  const cylinder = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_CYLINDER,
+    currentPlayer: BLACK,
+    initialBoard,
+  });
+  const moveIndex = 5;
+
+  assert.equal(buildLegalPolicyMask(mobius)[moveIndex], 0);
+  assert.equal(buildLegalPolicyMask(cylinder)[moveIndex], 1);
+  assert.deepEqual(mobius.getBoard(), initialBoard);
+  assert.deepEqual(cylinder.getBoard(), initialBoard);
 });
 
 test("KataGo policy mask honors restored positional-superko history", () => {

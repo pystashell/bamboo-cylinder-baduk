@@ -334,6 +334,80 @@ test("creates, serializes and restores a torus room", () => {
   );
 });
 
+test("creates, serializes and restores a Mobius room", () => {
+  const room = RoomEngine.create({
+    code: "MAB234",
+    name: "莫比乌斯黑方",
+    size: 9,
+    komi: 6.5,
+    scoringRule: "japanese",
+    topology: "mobius",
+    playerId: "mobius-black",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+
+  const snapshot = room.snapshot(1_001);
+  assert.equal(snapshot.game.topology, "mobius");
+  assert.ok(
+    room.game.neighbors(1, 0).some(
+      (point) => point.row === 7 && point.col === 8,
+    ),
+  );
+  const serialized = room.serialize();
+  assert.equal(serialized.game.topology, "mobius");
+  const restored = RoomEngine.restore(serialized);
+  assert.equal(restored.snapshot(1_002).game.topology, "mobius");
+  assert.ok(
+    restored.game.neighbors(1, 0).some(
+      (point) => point.row === 7 && point.col === 8,
+    ),
+  );
+});
+
+test("authoritative Mobius rooms capture across the reversed seam", () => {
+  const room = RoomEngine.create({
+    code: "MBS234",
+    name: "莫比乌斯黑方",
+    size: 5,
+    komi: 6.5,
+    scoringRule: "japanese",
+    topology: "mobius",
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 1_100);
+
+  const moves = [
+    ["black-player", 0, 0],
+    ["white-player", 1, 0],
+    ["black-player", 2, 0],
+    ["white-player", 4, 2],
+    ["black-player", 1, 1],
+    ["white-player", 4, 3],
+    ["black-player", 3, 4],
+  ];
+  let result;
+  for (let index = 0; index < moves.length; index += 1) {
+    const [playerId, row, col] = moves[index];
+    result = room.applyAction({
+      playerId,
+      action: "play",
+      payload: { row, col },
+      now: 2_000 + index,
+    });
+  }
+
+  assert.deepEqual(result.move.captured, [{ row: 1, col: 0 }]);
+  assert.equal(result.room.game.board[1][0], null);
+  assert.equal(result.room.game.board[3][4], "black");
+  assert.equal(result.room.game.captures.black, 1);
+  assert.deepEqual(result.room.game.lastMove.captured, [
+    { row: 1, col: 0 },
+  ]);
+});
+
 test("defaults legacy persisted games without topology to cylinder", () => {
   const legacyState = createRoom().serialize();
   delete legacyState.game.topology;
@@ -411,13 +485,21 @@ test("lets the host switch topology for a new game and rejects invalid topology"
   });
   assert.equal(torus.room.game.topology, "torus");
 
+  const mobius = room.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: { topology: "mobius" },
+    now: 3_050,
+  });
+  assert.equal(mobius.room.game.topology, "mobius");
+
   const preserved = room.applyAction({
     playerId: "black-player",
     action: "new_game",
     payload: { size: 13 },
     now: 3_100,
   });
-  assert.equal(preserved.room.game.topology, "torus");
+  assert.equal(preserved.room.game.topology, "mobius");
 
   assert.throws(
     () =>
@@ -429,7 +511,7 @@ test("lets the host switch topology for a new game and rejects invalid topology"
       }),
     (error) => error instanceof RoomEngineError && error.code === "BAD_REQUEST",
   );
-  assert.equal(room.snapshot(3_201).game.topology, "torus");
+  assert.equal(room.snapshot(3_201).game.topology, "mobius");
 });
 
 test("requires both colors to confirm before finishing scoring", () => {

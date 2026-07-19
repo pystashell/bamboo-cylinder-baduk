@@ -47,6 +47,12 @@ test("text chat remains uncensored while legal coordinates become references", (
   assert.deepEqual(extractBoardCoordinates("看D4这里，但 BAD4 和 D4A 不是坐标", 19), [
     { row: 15, col: 3, label: "D4" },
   ]);
+  const mobius = normalizeChatPayload(
+    { kind: "text", text: "看 D4" },
+    { size: 19, topology: "mobius" },
+  );
+  assert.equal(mobius.boardTopology, "mobius");
+  assert.deepEqual(mobius.points, [{ row: 15, col: 3, label: "D4" }]);
 });
 
 test("chat applies only structural limits and a fixed sticker id catalog", () => {

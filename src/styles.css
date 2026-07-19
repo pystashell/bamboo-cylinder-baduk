@@ -130,7 +130,7 @@ summary:focus-visible {
 
 .topology-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--line);
@@ -217,7 +217,8 @@ summary:focus-visible {
   cursor: grabbing;
 }
 
-#torus-scene {
+#torus-scene,
+#mobius-scene {
   cursor: grab;
 }
 
@@ -1372,7 +1373,7 @@ select:disabled {
 }
 
 .topology-buttons {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .size-buttons button {

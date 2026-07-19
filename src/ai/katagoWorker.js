@@ -8,7 +8,6 @@ import {
   chooseMonteCarloMoveAsync,
   SearchCancelledError,
 } from "./mcts.js";
-import { TOPOLOGY_TORUS } from "../game/goEngine.js";
 import { attachKataGoWorkerRuntime } from "./katagoWorkerRuntime.js";
 import { getAIModel } from "./modelCatalog.js";
 import {
@@ -162,7 +161,7 @@ async function neuralPolicy({ scope, id, modelId, state, signal, postStatus }) {
     output = loaded.model.forwardPolicyValue(
       spatial,
       global,
-      state.topology === TOPOLOGY_TORUS,
+      state.topology,
     );
     const [policy, pass] = await Promise.all([
       output.policy.data(),

@@ -1,7 +1,11 @@
 import { trimStoredChatHistory } from "./chat.js";
+import {
+  BADUK_PROTOCOL_VERSION,
+  BADUK_WS_PROTOCOL,
+} from "./protocol.js";
 
 const DEFAULT_ROOM_PATH = "/api/rooms";
-const DEFAULT_PROTOCOL = "bamboo-baduk-v1";
+const DEFAULT_PROTOCOL = BADUK_WS_PROTOCOL;
 const DEFAULT_STORAGE_PREFIX = "bamboo-baduk.session.";
 
 export const CONNECTION_STATUS = Object.freeze({
@@ -219,7 +223,7 @@ export function buildCommandEnvelope(id, sequence, action, payload = {}) {
     });
   }
   return {
-    v: 1,
+    v: BADUK_PROTOCOL_VERSION,
     type: "command",
     id: String(id),
     sequence,
@@ -447,7 +451,7 @@ export class RoomClient {
     this._setStatus(CONNECTION_STATUS.CREATING);
     try {
       const response = await this._post(this.createRoomPath, {
-        v: 1,
+        v: BADUK_PROTOCOL_VERSION,
         ...gameOptions,
         ...requestConfig,
         name,
@@ -489,7 +493,7 @@ export class RoomClient {
     this._setStatus(CONNECTION_STATUS.JOINING, { roomCode: code });
     try {
       const response = await this._post(this.joinRoomPath(code), {
-        v: 1,
+        v: BADUK_PROTOCOL_VERSION,
         name,
         role: config.role === "spectator" ? "spectator" : "player",
       });
@@ -595,7 +599,11 @@ export class RoomClient {
       });
       if (this.sendAuthMessage) {
         socket.send(
-          JSON.stringify({ v: 1, type: "join", session: this.session }),
+          JSON.stringify({
+            v: BADUK_PROTOCOL_VERSION,
+            type: "join",
+            session: this.session,
+          }),
         );
       }
       this._flushPendingCommands();
@@ -716,6 +724,20 @@ export class RoomClient {
           details: rawData,
         }),
       );
+      return;
+    }
+
+    if (message?.v !== BADUK_PROTOCOL_VERSION) {
+      this._emitError(
+        new RoomClientError("客户端与房间服务版本不兼容，请刷新页面。", {
+          code: "PROTOCOL_UPGRADE_REQUIRED",
+          details: message,
+        }),
+      );
+      this.disconnect({
+        preserveSession: true,
+        status: CONNECTION_STATUS.DISCONNECTED,
+      });
       return;
     }
 

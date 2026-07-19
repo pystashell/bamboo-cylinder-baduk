@@ -11,6 +11,7 @@ import {
   SCORING_CHINESE,
   SCORING_JAPANESE,
   TOPOLOGY_CYLINDER,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
   UNDO_HISTORY_LIMIT,
   WHITE,
@@ -75,6 +76,127 @@ test("torus boards give every point four neighbours across both seams", () => {
         assert.equal(game.neighbors(row, col).length, 4);
       }
     }
+  }
+});
+
+test("Mobius boards reverse rows at the column seam and retain one boundary", () => {
+  for (const size of [4, 5, 9, 13, 19]) {
+    const game = new GoEngine({ size, topology: TOPOLOGY_MOBIUS });
+    for (let row = 0; row < size; row += 1) {
+      assert.ok(
+        game.neighbors(row, 0).some(
+          (point) => point.row === size - 1 - row && point.col === size - 1,
+        ),
+      );
+      assert.ok(
+        game.neighbors(row, size - 1).some(
+          (point) => point.row === size - 1 - row && point.col === 0,
+        ),
+      );
+      for (let col = 0; col < size; col += 1) {
+        const neighbours = game.neighbors(row, col);
+        const keys = neighbours.map((point) => `${point.row},${point.col}`);
+        assert.equal(new Set(keys).size, keys.length);
+        assert.equal(neighbours.length, row === 0 || row === size - 1 ? 3 : 4);
+        for (const neighbour of neighbours) {
+          assert.ok(
+            game.neighbors(neighbour.row, neighbour.col).some(
+              (point) => point.row === row && point.col === col,
+            ),
+            `${row},${col} must be symmetric with ${neighbour.row},${neighbour.col}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("a Mobius move captures through the reversed seam", () => {
+  const game = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_MOBIUS,
+    currentPlayer: BLACK,
+    initialBoard: boardFromRows([
+      "B....",
+      "WB...",
+      "B....",
+      ".....",
+      ".....",
+    ]),
+  });
+
+  const result = game.play(3, 4);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.captured, [{ row: 1, col: 0 }]);
+  assert.equal(game.get(1, 0), EMPTY);
+  assert.equal(game.get(3, 4), BLACK);
+});
+
+test("Mobius suicide uses the reversed seam and remains transactional", () => {
+  const initialBoard = boardFromRows([
+    "W....",
+    ".W...",
+    "W....",
+    "....W",
+    ".....",
+  ]);
+  const game = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_MOBIUS,
+    currentPlayer: BLACK,
+    initialBoard,
+  });
+
+  assert.deepEqual(game.play(1, 0), {
+    ok: false,
+    reason: MOVE_ERRORS.SUICIDE,
+  });
+  assert.deepEqual(game.getBoard(), initialBoard);
+  assert.equal(game.currentPlayer, BLACK);
+});
+
+test("Mobius groups and territory connect through the reversed seam", () => {
+  const connected = new GoEngine({
+    size: 5,
+    topology: TOPOLOGY_MOBIUS,
+    initialBoard: boardFromRows([
+      ".....",
+      "B....",
+      ".....",
+      "....B",
+      ".....",
+    ]),
+  });
+  assert.deepEqual(
+    new Set(
+      connected
+        .getGroup(1, 0)
+        .stones.map(({ row, col }) => `${row},${col}`),
+    ),
+    new Set(["1,0", "3,4"]),
+  );
+
+  const scoringGame = new GoEngine({
+    size: 5,
+    komi: 0,
+    topology: TOPOLOGY_MOBIUS,
+    initialBoard: boardFromRows([
+      "BBBBB",
+      ".BBBB",
+      "BBBBB",
+      "BBBB.",
+      "BBBBB",
+    ]),
+  });
+  for (const rule of [SCORING_CHINESE, SCORING_JAPANESE]) {
+    const score = scoringGame.score(rule);
+    assert.equal(score.territory[BLACK], 2);
+    assert.equal(score.regions.length, 1);
+    assert.deepEqual(
+      new Set(score.regions[0].points.map(({ row, col }) => `${row},${col}`)),
+      new Set(["1,0", "3,4"]),
+    );
   }
 });
 
@@ -168,6 +290,15 @@ test("topology round-trips while legacy states default to a cylinder", () => {
   const restored = GoEngine.fromState(torus.exportState());
   assert.equal(restored.topology, TOPOLOGY_TORUS);
   assert.deepEqual(restored.exportState(), torus.exportState());
+
+  const mobius = new GoEngine({ size: 5, topology: TOPOLOGY_MOBIUS });
+  const restoredMobius = GoEngine.fromState(mobius.exportState());
+  assert.equal(restoredMobius.topology, TOPOLOGY_MOBIUS);
+  assert.ok(
+    restoredMobius.neighbors(1, 0).some(
+      (point) => point.row === 3 && point.col === 4,
+    ),
+  );
 
   const legacyState = torus.exportState();
   delete legacyState.topology;

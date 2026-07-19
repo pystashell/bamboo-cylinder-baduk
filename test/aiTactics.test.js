@@ -6,6 +6,7 @@ import {
   BLACK,
   EMPTY,
   GoEngine,
+  TOPOLOGY_MOBIUS,
   TOPOLOGY_TORUS,
   WHITE,
 } from "../src/game/goEngine.js";
@@ -93,6 +94,27 @@ test("small-budget AI takes a forced capture across the torus row seam", () => {
       }),
     "4,2",
     "black must capture the white stone whose final liberty wraps to row 4",
+  );
+});
+
+test("small-budget AI takes a forced capture across the reversed Mobius seam", () => {
+  assertMoveAcrossSeeds(
+    () =>
+      new GoEngine({
+        size: 5,
+        komi: 0,
+        topology: TOPOLOGY_MOBIUS,
+        currentPlayer: BLACK,
+        initialBoard: boardFromRows([
+          "B....",
+          "WB...",
+          "B....",
+          ".....",
+          ".....",
+        ]),
+      }),
+    "3,4",
+    "black must capture through the seam after reversing the row",
   );
 });
 

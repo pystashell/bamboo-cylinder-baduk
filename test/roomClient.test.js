@@ -63,7 +63,10 @@ class MockWebSocket {
 
   message(value) {
     this.emit("message", {
-      data: typeof value === "string" ? value : JSON.stringify(value),
+      data:
+        typeof value === "string"
+          ? value
+          : JSON.stringify({ v: 2, ...value }),
     });
   }
 
@@ -140,7 +143,7 @@ test("the injectable token store persists and removes a room session", () => {
 
 test("command envelopes use a stable id and increasing sequence", () => {
   assert.deepEqual(buildCommandEnvelope("move-7", 7, "play", { row: 2, col: 3 }), {
-    v: 1,
+    v: 2,
     type: "command",
     id: "move-7",
     sequence: 7,
@@ -187,7 +190,7 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
   const result = await client.createRoom({ name: " 青竹 ", size: 13 });
   assert.equal(requests[0].url, "https://baduk.example/api/rooms");
   assert.deepEqual(JSON.parse(requests[0].init.body), {
-    v: 1,
+    v: 2,
     name: "青竹",
     size: 13,
   });
@@ -200,14 +203,14 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
   const socket = MockWebSocket.instances[0];
   assert.equal(socket.url, "wss://baduk.example/api/rooms/AB12CD/socket");
   assert.deepEqual(socket.protocols, [
-    "bamboo-baduk-v1",
+    "bamboo-baduk-v2",
     encodeTokenProtocol("token/with+symbols"),
   ]);
   socket.open();
   assert.equal(client.status, CONNECTION_STATUS.CONNECTED);
 
   socket.message({
-    v: 1,
+    v: 2,
     type: "state",
     room: { code: "AB12CD", revision: 1 },
     serverTime: 1234,
@@ -217,7 +220,7 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
 
   const commandPromise = client.command("play", { row: 4, col: 5 });
   assert.deepEqual(JSON.parse(socket.sent[0]), {
-    v: 1,
+    v: 2,
     type: "command",
     id: "move-1",
     sequence: 1,
@@ -229,6 +232,44 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
   assert.ok(statuses.includes(CONNECTION_STATUS.CONNECTED));
   assert.equal(createTokenStore(storage).get("AB12CD").nextSequence, 2);
   client.disconnect();
+});
+
+test("RoomClient rejects stale server envelopes before they reach the UI", async () => {
+  MockWebSocket.instances = [];
+  const states = [];
+  const errors = [];
+  const client = new RoomClient({
+    baseUrl: "https://baduk.example/",
+    storage: createMemoryStorage(),
+    WebSocketImpl: MockWebSocket,
+    fetchImpl: async () =>
+      jsonResponse({
+        session: {
+          code: "AB12CD",
+          token: "secret",
+          playerId: "black",
+          playerName: "黑方",
+        },
+        room: { code: "AB12CD", revision: 0 },
+      }),
+  });
+  client.on("state", (event) => states.push(event));
+  client.on("error", (error) => errors.push(error));
+
+  await client.createRoom({ name: "黑方" });
+  const socket = MockWebSocket.instances[0];
+  socket.open();
+  socket.message({
+    v: 1,
+    type: "state",
+    room: { code: "AB12CD", revision: 99, game: { topology: "mobius" } },
+  });
+
+  assert.equal(states.length, 1);
+  assert.equal(client.room.revision, 0);
+  assert.equal(errors.at(-1).code, "PROTOCOL_UPGRADE_REQUIRED");
+  assert.equal(client.connectionStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(client.session.token, "secret");
 });
 
 test("RoomClient sends chat independently and merges incremental chat events", async () => {
@@ -267,7 +308,7 @@ test("RoomClient sends chat independently and merges incremental chat events", a
     text: "D4 <script>只是文字</script> 😄",
   });
   assert.deepEqual(JSON.parse(socket.sent[0]), {
-    v: 1,
+    v: 2,
     type: "command",
     id: "chat-1",
     sequence: 1,

@@ -2,16 +2,57 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BADUK_PROTOCOL_VERSION,
+  BADUK_WS_PROTOCOL,
+  LEGACY_BADUK_WS_PROTOCOL,
   normalizeCommandMessage,
+  parseWebSocketProtocols,
   ROOM_ACTIONS,
+  UNVERSIONED_BADUK_WS_PROTOCOL,
 } from "../src/multiplayer/protocol.js";
+
+test("protocol v2 is explicit while stale socket names remain detectable", () => {
+  assert.equal(BADUK_PROTOCOL_VERSION, 2);
+  assert.equal(BADUK_WS_PROTOCOL, "bamboo-baduk-v2");
+  assert.equal(
+    normalizeCommandMessage({
+      v: 1,
+      type: "command",
+      id: "stale-v1",
+      sequence: 1,
+      action: "pass",
+    }),
+    null,
+  );
+  assert.equal(
+    normalizeCommandMessage({
+      type: "command",
+      id: "missing-version",
+      sequence: 1,
+      action: "pass",
+    }),
+    null,
+  );
+  assert.deepEqual(
+    parseWebSocketProtocols(`${BADUK_WS_PROTOCOL}, reconnect-token`),
+    { protocol: BADUK_WS_PROTOCOL, token: "reconnect-token" },
+  );
+  assert.deepEqual(
+    parseWebSocketProtocols(`${LEGACY_BADUK_WS_PROTOCOL}, old-token`),
+    { protocol: LEGACY_BADUK_WS_PROTOCOL, token: "old-token" },
+  );
+  assert.deepEqual(
+    parseWebSocketProtocols(`${UNVERSIONED_BADUK_WS_PROTOCOL}, old-token`),
+    { protocol: UNVERSIONED_BADUK_WS_PROTOCOL, token: "old-token" },
+  );
+});
 
 test("undo room actions pass through the WebSocket command whitelist", () => {
   for (const action of ["request_undo", "respond_undo", "cancel_undo"]) {
     assert.ok(ROOM_ACTIONS.includes(action));
     assert.deepEqual(
       normalizeCommandMessage({
-        v: 1,
+        v: 2,
         type: "command",
         id: `undo-${action}`,
         sequence: 1,
@@ -36,7 +77,7 @@ test("chat is whitelisted and requires a reconnect-safe command sequence", () =>
   assert.ok(ROOM_ACTIONS.includes("chat"));
   assert.deepEqual(
     normalizeCommandMessage({
-      v: 1,
+      v: 2,
       type: "command",
       id: "chat-1",
       sequence: 7,
@@ -52,7 +93,7 @@ test("chat is whitelisted and requires a reconnect-safe command sequence", () =>
   );
   assert.equal(
     normalizeCommandMessage({
-      v: 1,
+      v: 2,
       type: "command",
       id: "chat-without-sequence",
       action: "chat",

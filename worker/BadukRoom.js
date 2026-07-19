@@ -1,5 +1,6 @@
 import {
   BADUK_PROTOCOL_VERSION,
+  BADUK_WS_PROTOCOL,
   isRecord,
   makeAckMessage,
   makeChatMessage,
@@ -165,7 +166,11 @@ export class BadukRoom {
       // The subprotocol already authenticates the socket.  Accepting this
       // harmless message keeps clients built against the earlier join-message
       // proposal compatible.
-      if (isRecord(value) && value.type === "join") {
+      if (
+        isRecord(value) &&
+        value.v === BADUK_PROTOCOL_VERSION &&
+        value.type === "join"
+      ) {
         this.sendWelcome(socket, attachment.identity, this.engine.snapshot());
         return;
       }
@@ -264,6 +269,15 @@ export class BadukRoom {
     const { protocol, token } = parseWebSocketProtocols(
       request.headers.get("Sec-WebSocket-Protocol"),
     );
+    if (protocol && protocol !== BADUK_WS_PROTOCOL) {
+      return jsonResponse(
+        {
+          error: "客户端版本过旧，请刷新页面后重新连接。",
+          code: "PROTOCOL_UPGRADE_REQUIRED",
+        },
+        426,
+      );
+    }
     if (!protocol || !token) {
       return jsonResponse(
         {
