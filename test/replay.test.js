@@ -19,6 +19,34 @@ import {
   buildReplayStateAtStep,
 } from "../src/game/replay.js";
 
+test("a public timeout outcome finishes only the final replay frame", () => {
+  const game = new GoEngine({ size: 9 });
+  assert.equal(game.play(2, 2).ok, true);
+  assert.equal(game.play(3, 3).ok, true);
+  const replay = game.getReplayState();
+  replay.outcome = {
+    reason: "timeout",
+    winner: "black",
+    loser: "white",
+    finishedAt: 12_345,
+  };
+
+  const { frames } = buildReplayFrames(replay);
+  assert.equal(frames[1].phase, "play");
+  assert.equal(frames.at(-1).phase, "finished");
+  assert.deepEqual(frames.at(-1).result, {
+    reason: "timeout",
+    winner: "black",
+    loser: "white",
+    margin: 0,
+    finishedAt: 12_345,
+  });
+  assert.throws(
+    () => buildReplayFrames({ ...replay, outcome: { reason: "timeout" } }),
+    /valid timeout result/u,
+  );
+});
+
 function boardFromRows(rows) {
   return rows.map((row) =>
     [...row].map((point) =>

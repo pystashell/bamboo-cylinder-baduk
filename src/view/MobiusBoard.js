@@ -46,8 +46,8 @@ export class MobiusBoard extends TorusBoard {
     this.gridHalfWidth = this.surfaceHalfWidth * 0.88;
     this.minorRadius = this.surfaceHalfWidth;
     this.mobiusRowSpacing =
-      (this.gridHalfWidth * 2) / Math.max(1, this.size - 1);
-    this.mobiusColumnSpacing = (this.majorRadius * MOBIUS_TAU) / this.size;
+      (this.gridHalfWidth * 2) / Math.max(1, this.height - 1);
+    this.mobiusColumnSpacing = (this.majorRadius * MOBIUS_TAU) / this.width;
     this.mobiusStoneRadius = Math.max(
       0.11,
       Math.min(
@@ -62,7 +62,7 @@ export class MobiusBoard extends TorusBoard {
       majorRadius: this.majorRadius,
       halfWidth: this.surfaceHalfWidth,
       uSegments: this.tubularSegments,
-      vSegments: Math.max(18, this.size * 2),
+      vSegments: Math.max(18, this.height * 2),
     });
     const material = new THREE.MeshStandardMaterial({
       color: 0xb57b3d,
@@ -93,8 +93,8 @@ export class MobiusBoard extends TorusBoard {
     });
     const lineRadius = Math.max(0.009, this.mobiusStoneRadius * 0.065);
 
-    for (let row = 0; row < this.size; row += 1) {
-      const v = this.gridHalfWidth * (1 - (2 * row) / (this.size - 1));
+    for (let row = 0; row < this.height; row += 1) {
+      const v = this.gridHalfWidth * (1 - (2 * row) / (this.height - 1));
       const curve = new MobiusRowCurve({
         majorRadius: this.majorRadius,
         v,
@@ -114,11 +114,11 @@ export class MobiusBoard extends TorusBoard {
       );
     }
 
-    for (let col = 0; col < this.size; col += 1) {
+    for (let col = 0; col < this.width; col += 1) {
       const curve = new MobiusColumnCurve({
         majorRadius: this.majorRadius,
         halfWidth: this.gridHalfWidth,
-        u: (col * MOBIUS_TAU) / this.size,
+        u: (col * MOBIUS_TAU) / this.width,
       });
       this.boardGroup.add(
         new THREE.Mesh(
@@ -158,8 +158,8 @@ export class MobiusBoard extends TorusBoard {
       roughness: 0.65,
     });
     const starRadius = Math.max(0.035, this.mobiusStoneRadius * 0.2);
-    for (const row of starIndices(this.size)) {
-      for (const col of starIndices(this.size)) {
+    for (const row of starIndices(this.height)) {
+      for (const col of starIndices(this.width)) {
         const frame = this.frame(row, col);
         const star = new THREE.Mesh(
           new THREE.SphereGeometry(starRadius, 12, 8),
@@ -174,8 +174,8 @@ export class MobiusBoard extends TorusBoard {
     // nearest canonical grid point. This avoids ambiguous inverse parameters
     // at the reversed seam and is bounded by the app's 25x25 board maximum.
     this.canonicalPoints = [];
-    for (let row = 0; row < this.size; row += 1) {
-      for (let col = 0; col < this.size; col += 1) {
+    for (let row = 0; row < this.height; row += 1) {
+      for (let col = 0; col < this.width; col += 1) {
         this.canonicalPoints.push({
           row,
           col,
@@ -189,8 +189,8 @@ export class MobiusBoard extends TorusBoard {
     return mobiusGridFrame({
       row,
       col,
-      height: this.size,
-      width: this.size,
+      height: this.height,
+      width: this.width,
       majorRadius: this.majorRadius,
       halfWidth: this.gridHalfWidth,
     });
@@ -247,21 +247,43 @@ export class MobiusBoard extends TorusBoard {
     );
   }
 
-  addAnalysisMarker(row, col) {
+  addAnalysisMarker(row, col, candidate = null, index = 0) {
     const radius = this.mobiusStoneRadius;
+    const palette = [0x38e4c5, 0x6c9eff, 0xb58cff, 0xe7a853, 0xe96f78];
+    const active = Boolean(candidate?.active);
     this.addPairedMarker(
       row,
       col,
       Math.max(0.008, this.mobiusStoneThickness * 0.18),
-      () => new THREE.CircleGeometry(radius * 0.82, 4),
+      () => new THREE.CircleGeometry(radius * (active ? 0.96 : 0.76), 4),
       () =>
         new THREE.MeshBasicMaterial({
-          color: 0x38e4c5,
+          color: palette[Math.min(index, palette.length - 1)],
           transparent: true,
           opacity: 0.82,
           side: THREE.DoubleSide,
           depthTest: true,
           depthWrite: false,
+        }),
+    );
+  }
+
+  addVariationMarker(row, col, entry = null, index = 0) {
+    const radius = this.mobiusStoneRadius;
+    this.addPairedMarker(
+      row,
+      col,
+      this.mobiusStoneThickness * 1.22,
+      () => new THREE.RingGeometry(
+        radius * 0.42,
+        radius * (0.65 + Math.min(index, 4) * 0.025),
+        28,
+      ),
+      () =>
+        new THREE.MeshBasicMaterial({
+          color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
+          side: THREE.DoubleSide,
+          depthTest: true,
         }),
     );
   }
@@ -314,9 +336,9 @@ export class MobiusBoard extends TorusBoard {
       !Number.isInteger(point?.row) ||
       !Number.isInteger(point?.col) ||
       point.row < 0 ||
-      point.row >= this.size ||
+      point.row >= this.height ||
       point.col < 0 ||
-      point.col >= this.size
+      point.col >= this.width
     ) {
       return;
     }

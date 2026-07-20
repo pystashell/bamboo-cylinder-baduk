@@ -61,8 +61,8 @@ function parsePointKey(key) {
   return { row, col };
 }
 
-function makeEmptyBoard(size) {
-  return Array.from({ length: size }, () => Array(size).fill(EMPTY));
+function makeEmptyBoard(width, height) {
+  return Array.from({ length: height }, () => Array(width).fill(EMPTY));
 }
 
 function copyBoard(board) {
@@ -171,22 +171,22 @@ function sameSerializableValue(left, right) {
   );
 }
 
-function copyStatePoint(point, size, label) {
+function copyStatePoint(point, width, height, label) {
   requirePlainObject(point, label);
   if (
     !Number.isInteger(point.row) ||
     !Number.isInteger(point.col) ||
     point.row < 0 ||
-    point.row >= size ||
+    point.row >= height ||
     point.col < 0 ||
-    point.col >= size
+    point.col >= width
   ) {
     throw new RangeError(`${label} must be a point on the board`);
   }
   return { row: point.row, col: point.col };
 }
 
-function copyLastMove(lastMove, size) {
+function copyLastMove(lastMove, width, height) {
   if (lastMove === null) return null;
   requirePlainObject(lastMove, "lastMove");
   if (!VALID_COLORS.has(lastMove.color)) {
@@ -199,13 +199,18 @@ function copyLastMove(lastMove, size) {
     throw new TypeError(`Unknown last-move type: ${lastMove.type}`);
   }
 
-  const point = copyStatePoint(lastMove, size, "lastMove");
+  const point = copyStatePoint(lastMove, width, height, "lastMove");
   if (!Array.isArray(lastMove.captured)) {
     throw new TypeError("lastMove.captured must be an array");
   }
   const seen = new Set();
   const captured = lastMove.captured.map((stone, index) => {
-    const copy = copyStatePoint(stone, size, `lastMove.captured[${index}]`);
+    const copy = copyStatePoint(
+      stone,
+      width,
+      height,
+      `lastMove.captured[${index}]`,
+    );
     const key = pointKey(copy.row, copy.col);
     if (seen.has(key)) {
       throw new TypeError(`lastMove.captured contains duplicate point ${key}`);
@@ -222,7 +227,7 @@ function copyLastMove(lastMove, size) {
   };
 }
 
-function copyReplayEvent(event, size, index) {
+function copyReplayEvent(event, width, height, index) {
   const label = `replay.events[${index}]`;
   requirePlainObject(event, label);
   requireOwnProperty(event, "type", label);
@@ -232,7 +237,7 @@ function copyReplayEvent(event, size, index) {
     if (!VALID_COLORS.has(event.color)) {
       throw new TypeError(`Unknown replay move color: ${event.color}`);
     }
-    const point = copyStatePoint(event, size, label);
+    const point = copyStatePoint(event, width, height, label);
     return {
       type: "play",
       color: event.color,
@@ -260,7 +265,7 @@ function copyReplayEvent(event, size, index) {
   }
 
   if (event.type === "toggle_dead") {
-    const point = copyStatePoint(event, size, label);
+    const point = copyStatePoint(event, width, height, label);
     return { type: "toggle_dead", row: point.row, col: point.col };
   }
 
@@ -272,12 +277,12 @@ function copyReplayEvent(event, size, index) {
   throw new TypeError(`Unknown replay event type: ${event.type}`);
 }
 
-function isPositionHashForSize(hash, size) {
+function isPositionHashForDimensions(hash, width, height) {
   if (typeof hash !== "string") return false;
   const rows = hash.split("/");
   return (
-    rows.length === size &&
-    rows.every((row) => row.length === size && /^[BW.]+$/.test(row))
+    rows.length === height &&
+    rows.every((row) => row.length === width && /^[BW.]+$/.test(row))
   );
 }
 
@@ -288,8 +293,9 @@ function isPositionHashForSize(hash, size) {
 export class GoEngine {
   /**
    * @param {object} [options]
-   * @param {number} [options.size=19] Board width and height (9, 13 and 19 are
-   *   the intended presets, but any integer >= 3 is supported).
+   * @param {number} [options.size] Legacy square board dimension.
+   * @param {number} [options.width] Board column count.
+   * @param {number} [options.height] Board row count.
    * @param {number} [options.komi=6.5]
    * @param {'japanese'|'chinese'} [options.scoringRule='japanese']
    * @param {'cylinder'|'torus'|'mobius'} [options.topology='cylinder']
@@ -297,15 +303,35 @@ export class GoEngine {
    * @param {'black'|'white'} [options.currentPlayer='black']
    */
   constructor({
-    size = 19,
+    size,
+    width,
+    height,
     komi = 6.5,
     scoringRule = SCORING_JAPANESE,
     topology = TOPOLOGY_CYLINDER,
     initialBoard = null,
     currentPlayer = BLACK,
   } = {}) {
-    if (!Number.isInteger(size) || size < 3) {
-      throw new RangeError("Board size must be an integer of at least 3");
+    const fallbackDimension = size ?? width ?? height ?? 19;
+    const resolvedWidth = width ?? fallbackDimension;
+    const resolvedHeight = height ?? fallbackDimension;
+    if (
+      !Number.isInteger(resolvedWidth) ||
+      !Number.isInteger(resolvedHeight) ||
+      resolvedWidth < 3 ||
+      resolvedHeight < 3 ||
+      resolvedWidth > 25 ||
+      resolvedHeight > 25
+    ) {
+      throw new RangeError(
+        "Board width and height must be integers from 3 to 25",
+      );
+    }
+    if (
+      size !== undefined &&
+      (resolvedWidth !== size || resolvedHeight !== size)
+    ) {
+      throw new RangeError("Legacy size must match both width and height");
     }
     if (!Number.isFinite(komi)) {
       throw new TypeError("Komi must be a finite number");
@@ -314,13 +340,17 @@ export class GoEngine {
       throw new TypeError(`Unknown player color: ${currentPlayer}`);
     }
 
-    this.size = size;
+    this.width = resolvedWidth;
+    this.height = resolvedHeight;
+    // `size` remains an exact square-only compatibility alias. Rectangular
+    // callers must use width/height so a single number is never ambiguous.
+    this.size = resolvedWidth === resolvedHeight ? resolvedWidth : undefined;
     this.komi = komi;
     this.scoringRule = normalizeScoringRule(scoringRule);
     this.topology = normalizeTopology(topology);
     this.board = initialBoard
       ? this.#validateAndCopyBoard(initialBoard)
-      : makeEmptyBoard(size);
+      : makeEmptyBoard(this.width, this.height);
     this.currentPlayer = currentPlayer;
     this.phase = PHASE_PLAY;
     this.consecutivePasses = 0;
@@ -359,7 +389,6 @@ export class GoEngine {
     requirePlainObject(snapshot, "State");
 
     const requiredFields = [
-      "size",
       "komi",
       "scoringRule",
       "board",
@@ -373,6 +402,23 @@ export class GoEngine {
       "positionHistory",
     ];
     for (const field of requiredFields) requireOwnProperty(snapshot, field);
+    const hasWidth = Object.prototype.hasOwnProperty.call(snapshot, "width");
+    const hasHeight = Object.prototype.hasOwnProperty.call(snapshot, "height");
+    const hasLegacySize = Object.prototype.hasOwnProperty.call(snapshot, "size");
+    if (hasWidth !== hasHeight || (!hasWidth && !hasLegacySize)) {
+      throw new TypeError(
+        "State must contain both width and height, or a legacy size",
+      );
+    }
+    if (
+      hasWidth &&
+      hasLegacySize &&
+      (snapshot.width !== snapshot.height || snapshot.size !== snapshot.width)
+    ) {
+      throw new RangeError(
+        "State size is only valid when it matches square width and height",
+      );
+    }
 
     // Check the bounded snapshot list before validating or copying any of its
     // nested boards. This makes oversized persisted input fail fast.
@@ -388,7 +434,9 @@ export class GoEngine {
     }
 
     const game = new GoEngine({
-      size: snapshot.size,
+      ...(hasWidth
+        ? { width: snapshot.width, height: snapshot.height }
+        : { size: snapshot.size }),
       komi: snapshot.komi,
       scoringRule: snapshot.scoringRule,
       // States exported before multiple topologies existed were cylindrical.
@@ -430,7 +478,12 @@ export class GoEngine {
     }
     const deadStones = new Set();
     snapshot.deadStones.forEach((point, index) => {
-      const copy = copyStatePoint(point, game.size, `deadStones[${index}]`);
+      const copy = copyStatePoint(
+        point,
+        game.width,
+        game.height,
+        `deadStones[${index}]`,
+      );
       const key = pointKey(copy.row, copy.col);
       if (deadStones.has(key)) {
         throw new TypeError(`deadStones contains duplicate point ${key}`);
@@ -444,7 +497,11 @@ export class GoEngine {
       throw new TypeError("deadStones must be empty while play is active");
     }
 
-    const lastMove = copyLastMove(snapshot.lastMove, game.size);
+    const lastMove = copyLastMove(
+      snapshot.lastMove,
+      game.width,
+      game.height,
+    );
 
     if (
       !Array.isArray(snapshot.positionHistory) ||
@@ -454,7 +511,7 @@ export class GoEngine {
     }
     const positionHistory = new Set();
     snapshot.positionHistory.forEach((hash, index) => {
-      if (!isPositionHashForSize(hash, game.size)) {
+      if (!isPositionHashForDimensions(hash, game.width, game.height)) {
         throw new TypeError(`positionHistory[${index}] is not a valid board hash`);
       }
       if (positionHistory.has(hash)) {
@@ -521,14 +578,14 @@ export class GoEngine {
   }
 
   #validateAndCopyBoard(board) {
-    if (!Array.isArray(board) || board.length !== this.size) {
-      throw new RangeError(`Initial board must contain ${this.size} rows`);
+    if (!Array.isArray(board) || board.length !== this.height) {
+      throw new RangeError(`Initial board must contain ${this.height} rows`);
     }
 
     return board.map((row, rowIndex) => {
-      if (!Array.isArray(row) || row.length !== this.size) {
+      if (!Array.isArray(row) || row.length !== this.width) {
         throw new RangeError(
-          `Initial board row ${rowIndex} must contain ${this.size} points`,
+          `Initial board row ${rowIndex} must contain ${this.width} points`,
         );
       }
       return row.map((value) => {
@@ -577,8 +634,16 @@ export class GoEngine {
 
     const base = cloneSerializable(replay.base, "replay.base");
     const replayGame = GoEngine.fromState(base);
+    // Persist replay baselines in the same canonical dimension format as new
+    // top-level states, even when a restored square replay used legacy `size`
+    // alone. This keeps every newly serialized state self-describing.
+    base.width = replayGame.width;
+    base.height = replayGame.height;
+    if (replayGame.size === undefined) delete base.size;
+    else base.size = replayGame.size;
     if (
-      replayGame.size !== this.size ||
+      replayGame.width !== this.width ||
+      replayGame.height !== this.height ||
       replayGame.komi !== this.komi ||
       replayGame.scoringRule !== this.scoringRule ||
       replayGame.topology !== this.topology
@@ -587,7 +652,7 @@ export class GoEngine {
     }
 
     const events = replay.events.map((event, index) =>
-      copyReplayEvent(event, this.size, index),
+      copyReplayEvent(event, this.width, this.height, index),
     );
     events.forEach((event, index) => {
       let result;
@@ -696,7 +761,7 @@ export class GoEngine {
       consecutivePasses: this.consecutivePasses,
       captures: { ...this.captures },
       deadStones: [...this.deadStones].map(parsePointKey),
-      lastMove: copyLastMove(this.lastMove, this.size),
+      lastMove: copyLastMove(this.lastMove, this.width, this.height),
       result:
         this.result === null
           ? null
@@ -713,7 +778,11 @@ export class GoEngine {
     this.deadStones = new Set(
       snapshot.deadStones.map(({ row, col }) => pointKey(row, col)),
     );
-    this.lastMove = copyLastMove(snapshot.lastMove, this.size);
+    this.lastMove = copyLastMove(
+      snapshot.lastMove,
+      this.width,
+      this.height,
+    );
     this.result =
       snapshot.result === null
         ? null
@@ -752,7 +821,7 @@ export class GoEngine {
       requireOwnProperty(entry, "move", `undoHistory[${index}]`);
       requireOwnProperty(entry, "before", `undoHistory[${index}]`);
 
-      const move = copyLastMove(entry.move, this.size);
+      const move = copyLastMove(entry.move, this.width, this.height);
       if (move === null) {
         throw new TypeError(`undoHistory[${index}].move must not be null`);
       }
@@ -831,7 +900,11 @@ export class GoEngine {
         );
       }
 
-      const lastMove = copyLastMove(before.lastMove, this.size);
+      const lastMove = copyLastMove(
+        before.lastMove,
+        this.width,
+        this.height,
+      );
       if (move.color !== before.currentPlayer) {
         throw new TypeError(
           `undoHistory[${index}].move color must match the player to move`,
@@ -939,7 +1012,7 @@ export class GoEngine {
 
   #recordUndo(move, before) {
     this.undoHistory.push({
-      move: copyLastMove(move, this.size),
+      move: copyLastMove(move, this.width, this.height),
       before,
     });
     if (this.undoHistory.length > UNDO_HISTORY_LIMIT) {
@@ -955,9 +1028,9 @@ export class GoEngine {
       Number.isInteger(row) &&
       Number.isInteger(col) &&
       row >= 0 &&
-      row < this.size &&
+      row < this.height &&
       col >= 0 &&
-      col < this.size
+      col < this.width
     );
   }
 
@@ -983,21 +1056,26 @@ export class GoEngine {
 
     const candidates = this.topology === TOPOLOGY_MOBIUS
       ? [col - 1, col + 1].map((coverColumn) => {
-          const point = mobiusPointFromCover(row, coverColumn, this.size);
+          const point = mobiusPointFromCover(
+            row,
+            coverColumn,
+            this.width,
+            this.height,
+          );
           return { row: point.row, col: point.col };
         })
       : [
-          { row, col: (col - 1 + this.size) % this.size },
-          { row, col: (col + 1) % this.size },
+          { row, col: (col - 1 + this.width) % this.width },
+          { row, col: (col + 1) % this.width },
         ];
     if (this.topology === TOPOLOGY_TORUS) {
       candidates.push(
-        { row: (row - 1 + this.size) % this.size, col },
-        { row: (row + 1) % this.size, col },
+        { row: (row - 1 + this.height) % this.height, col },
+        { row: (row + 1) % this.height, col },
       );
     } else {
       if (row > 0) candidates.push({ row: row - 1, col });
-      if (row < this.size - 1) candidates.push({ row: row + 1, col });
+      if (row < this.height - 1) candidates.push({ row: row + 1, col });
     }
 
     // The minimum board size is three, but keeping this deduplication makes the
@@ -1194,7 +1272,7 @@ export class GoEngine {
     return {
       ok: true,
       type: "undo",
-      move: copyLastMove(entry.move, this.size),
+      move: copyLastMove(entry.move, this.width, this.height),
       currentPlayer: this.currentPlayer,
       phase: this.phase,
     };
@@ -1266,8 +1344,8 @@ export class GoEngine {
     const neutralPoints = [];
     const regions = [];
 
-    for (let row = 0; row < this.size; row += 1) {
-      for (let col = 0; col < this.size; col += 1) {
+    for (let row = 0; row < this.height; row += 1) {
+      for (let col = 0; col < this.width; col += 1) {
         const startKey = pointKey(row, col);
         if (board[row][col] !== EMPTY || visited.has(startKey)) continue;
 
@@ -1388,7 +1466,9 @@ export class GoEngine {
   /** Small serializable state snapshot for UI stores and multiplayer messages. */
   getState() {
     return {
-      size: this.size,
+      ...(this.size === undefined ? {} : { size: this.size }),
+      width: this.width,
+      height: this.height,
       komi: this.komi,
       scoringRule: this.scoringRule,
       topology: this.topology,
@@ -1398,7 +1478,7 @@ export class GoEngine {
       consecutivePasses: this.consecutivePasses,
       captures: { ...this.captures },
       deadStones: [...this.deadStones].map(parsePointKey),
-      lastMove: copyLastMove(this.lastMove, this.size),
+      lastMove: copyLastMove(this.lastMove, this.width, this.height),
       result:
         this.result === null
           ? null

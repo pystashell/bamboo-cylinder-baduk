@@ -59,6 +59,7 @@ async function leaveQuietly(client) {
 
 const black = makeClient();
 const white = makeClient();
+const spectator = makeClient();
 
 try {
   const legacyResponse = await fetch(new URL("/api/rooms", target), {
@@ -84,8 +85,15 @@ try {
     komi: 6.5,
     scoringRule: "japanese",
     topology: "mobius",
+    mainTimeSeconds: 60,
+    byoYomiPeriods: 2,
+    byoYomiSeconds: 10,
   });
   await blackConnected;
+  requireCondition(
+    created.room?.timeControl?.activeColor === null,
+    "Authoritative clock started before both player seats were occupied",
+  );
 
   const whiteConnected = waitFor(
     white,
@@ -98,6 +106,18 @@ try {
   });
   await whiteConnected;
 
+  const spectatorConnected = waitFor(
+    spectator,
+    "connection",
+    ({ status }) => status === "connected",
+    "spectator WebSocket connection",
+  );
+  const watched = await spectator.joinRoom(created.roomCode, {
+    name: "Smoke Spectator",
+    role: "spectator",
+  });
+  await spectatorConnected;
+
   requireCondition(
     black._socket?.protocol === BADUK_WS_PROTOCOL &&
       white._socket?.protocol === BADUK_WS_PROTOCOL,
@@ -107,6 +127,27 @@ try {
   requireCondition(
     created.color === "black" && joined.color === "white",
     "Room seats were not assigned black then white",
+  );
+  requireCondition(
+    watched.session?.role === "spectator" && watched.session?.color === null,
+    "Explicit spectator join occupied a player seat",
+  );
+  requireCondition(
+    joined.room?.timeControl?.activeColor === "black" &&
+      joined.room?.timeControl?.running === true &&
+      joined.room?.timeControl?.byoYomiPeriods === 2,
+    "Authoritative Japanese clock did not start when the second player joined",
+  );
+
+  let spectatorWriteRejected = false;
+  try {
+    await spectator.command("play", { row: 8, col: 8 });
+  } catch (error) {
+    spectatorWriteRejected = ["FORBIDDEN", "NOT_A_PLAYER", "SPECTATOR_READ_ONLY"].includes(error?.code);
+  }
+  requireCondition(
+    spectatorWriteRejected,
+    "Spectator was able to issue a game-changing command",
   );
   requireCondition(
     created.room?.game?.topology === "mobius" &&
@@ -169,8 +210,14 @@ try {
     ({ room }) => room?.game?.board?.[0]?.[0] === "black",
     "black move on white client",
   );
+  const spectatorSawBlackMove = waitFor(
+    spectator,
+    "state",
+    ({ room }) => room?.game?.board?.[0]?.[0] === "black",
+    "black move on spectator client",
+  );
   await black.command("play", { row: 0, col: 0 });
-  await whiteSawBlackMove;
+  await Promise.all([whiteSawBlackMove, spectatorSawBlackMove]);
 
   const blackSawWhiteMove = waitFor(
     black,
@@ -266,9 +313,13 @@ try {
       coordinate: black.room.chat.messages[0].points[0].label,
       sticker: black.room.chat.messages[1].stickerId,
       synchronized: true,
+      clockStartedAfterBothSeats: true,
+      spectatorReadOnly: spectatorWriteRejected,
+      spectatorSynchronized: spectator.room?.game?.board?.[0]?.[0] === "black",
     }),
   );
 } finally {
+  await leaveQuietly(spectator);
   await leaveQuietly(white);
   await leaveQuietly(black);
 }

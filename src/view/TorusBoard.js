@@ -101,16 +101,23 @@ class TorusGridCurve extends THREE.Curve {
 }
 
 export class TorusBoard {
-  constructor(container, { size = 19, onPoint, onHover } = {}) {
+  constructor(container, { size, width, height, onPoint, onHover } = {}) {
+    const fallbackDimension = size ?? width ?? height ?? 19;
+    const boardWidth = width ?? fallbackDimension;
+    const boardHeight = height ?? fallbackDimension;
     this.container = container;
     this.onPoint = onPoint;
     this.onHover = onHover;
-    this.size = size;
+    this.width = boardWidth;
+    this.height = boardHeight;
+    this.size = boardWidth === boardHeight ? boardWidth : undefined;
     this.board = [];
     this.phase = "play";
     this.currentPlayer = "black";
     this.lastMove = null;
     this.analysisMove = null;
+    this.analysisCandidates = [];
+    this.analysisVariation = [];
     this.referencePoint = null;
     this.deadKeys = new Set();
     this.pointerStart = null;
@@ -190,21 +197,28 @@ export class TorusBoard {
     canvas.addEventListener("pointercancel", this.onPointerCancel);
     canvas.addEventListener("pointerleave", this.onPointerLeave);
 
-    this.rebuild(size);
+    this.rebuild(boardWidth, boardHeight);
     this.animate();
   }
 
-  rebuild(size) {
-    this.size = size;
-    this.minorRadius = (size * CELL) / TAU;
-    this.majorRadius = this.minorRadius * 2.1;
-    this.radialSegments = Math.max(64, size * 4);
-    this.tubularSegments = Math.max(128, size * 8);
-    this.board = Array.from({ length: size }, () => Array(size).fill(null));
+  rebuild(width, height = width) {
+    this.width = width;
+    this.height = height;
+    this.size = width === height ? width : undefined;
+    this.minorRadius = (height * CELL) / TAU;
+    this.majorRadius = Math.max(
+      (width * CELL * 2.1) / TAU,
+      this.minorRadius * 1.15,
+    );
+    this.radialSegments = Math.max(64, height * 4);
+    this.tubularSegments = Math.max(128, width * 8);
+    this.board = Array.from({ length: height }, () => Array(width).fill(null));
     this.currentPlayer = "black";
     this.phase = "play";
     this.lastMove = null;
     this.analysisMove = null;
+    this.analysisCandidates = [];
+    this.analysisVariation = [];
     this.referencePoint = null;
     this.deadKeys.clear();
     this.hoveredPoint = null;
@@ -255,11 +269,11 @@ export class TorusBoard {
     const gridMinorRadius = this.minorRadius + 0.018;
     const lineRadius = 0.0145;
 
-    for (let row = 0; row < this.size; row += 1) {
+    for (let row = 0; row < this.height; row += 1) {
       const curve = new TorusGridCurve({
         majorRadius: this.majorRadius,
         minorRadius: gridMinorRadius,
-        fixedAngle: (row * TAU) / this.size,
+        fixedAngle: (row * TAU) / this.height,
         direction: "row",
       });
       this.boardGroup.add(
@@ -276,11 +290,11 @@ export class TorusBoard {
       );
     }
 
-    for (let col = 0; col < this.size; col += 1) {
+    for (let col = 0; col < this.width; col += 1) {
       const curve = new TorusGridCurve({
         majorRadius: this.majorRadius,
         minorRadius: gridMinorRadius,
-        fixedAngle: (col * TAU) / this.size,
+        fixedAngle: (col * TAU) / this.width,
         direction: "column",
       });
       this.boardGroup.add(
@@ -301,9 +315,10 @@ export class TorusBoard {
       color: 0x1c1510,
       roughness: 0.65,
     });
-    const stars = starIndices(this.size);
-    for (const row of stars) {
-      for (const col of stars) {
+    const rowStars = starIndices(this.height);
+    const columnStars = starIndices(this.width);
+    for (const row of rowStars) {
+      for (const col of columnStars) {
         const frame = this.frame(row, col, 0.052);
         const star = new THREE.Mesh(
           new THREE.SphereGeometry(0.074, 12, 8),
@@ -364,7 +379,8 @@ export class TorusBoard {
     const frame = torusGridFrame({
       row,
       col,
-      size: this.size,
+      width: this.width,
+      height: this.height,
       majorRadius: this.majorRadius,
       minorRadius: this.minorRadius,
       offset,
@@ -385,25 +401,41 @@ export class TorusBoard {
 
   setPosition({
     board,
+    size,
+    width,
+    height,
     currentPlayer,
     phase,
     lastMove,
     deadStones = [],
     analysisMove = null,
+    analysisCandidates = [],
+    analysisVariation = [],
     referencePoint = null,
   }) {
+    const nextWidth = width ?? size ?? this.width;
+    const nextHeight = height ?? size ?? this.height;
+    if (nextWidth !== this.width || nextHeight !== this.height) {
+      this.rebuild(nextWidth, nextHeight);
+    }
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.analysisCandidates = Array.isArray(analysisCandidates)
+      ? analysisCandidates.slice(0, 5)
+      : [];
+    this.analysisVariation = Array.isArray(analysisVariation)
+      ? analysisVariation.slice(0, 8)
+      : [];
     this.referencePoint =
       Number.isInteger(referencePoint?.row) &&
       Number.isInteger(referencePoint?.col) &&
       referencePoint.row >= 0 &&
-      referencePoint.row < this.size &&
+      referencePoint.row < this.height &&
       referencePoint.col >= 0 &&
-      referencePoint.col < this.size
+      referencePoint.col < this.width
         ? { row: referencePoint.row, col: referencePoint.col }
         : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
@@ -418,8 +450,8 @@ export class TorusBoard {
       marker.material.dispose();
     }
 
-    for (let row = 0; row < this.size; row += 1) {
-      for (let col = 0; col < this.size; col += 1) {
+    for (let row = 0; row < this.height; row += 1) {
+      for (let col = 0; col < this.width; col += 1) {
         const color = board[row]?.[col];
         if (!color) continue;
         const dead = this.deadKeys.has(`${row},${col}`);
@@ -442,17 +474,32 @@ export class TorusBoard {
       this.addLastMoveMarker(lastMove.row, lastMove.col);
     }
     if (
+      this.analysisCandidates.length === 0 &&
       this.analysisMove &&
       Number.isInteger(this.analysisMove.row) &&
       Number.isInteger(this.analysisMove.col) &&
       this.analysisMove.row >= 0 &&
-      this.analysisMove.row < this.size &&
+      this.analysisMove.row < this.height &&
       this.analysisMove.col >= 0 &&
-      this.analysisMove.col < this.size &&
+      this.analysisMove.col < this.width &&
       !board[this.analysisMove.row]?.[this.analysisMove.col]
     ) {
       this.addAnalysisMarker(this.analysisMove.row, this.analysisMove.col);
     }
+    this.analysisCandidates.forEach((candidate, index) => {
+      const move = candidate?.move ?? candidate;
+      if (
+        move?.type === "play" &&
+        Number.isInteger(move.row) && Number.isInteger(move.col) &&
+        move.row >= 0 && move.row < this.height &&
+        move.col >= 0 && move.col < this.width &&
+        !board[move.row]?.[move.col]
+      ) this.addAnalysisMarker(move.row, move.col, candidate, index);
+    });
+    this.analysisVariation.forEach((entry, index) => {
+      const move = entry?.move ?? entry;
+      if (move?.type === "play") this.addVariationMarker(move.row, move.col, entry, index);
+    });
     if (this.referencePoint) {
       this.addReferenceMarker(
         this.referencePoint.row,
@@ -485,12 +532,14 @@ export class TorusBoard {
     this.markersGroup.add(marker);
   }
 
-  addAnalysisMarker(row, col) {
+  addAnalysisMarker(row, col, candidate = null, index = 0) {
+    const palette = [0x38e4c5, 0x6c9eff, 0xb58cff, 0xe7a853, 0xe96f78];
+    const active = Boolean(candidate?.active);
     const diamondFrame = this.frame(row, col, 0.068);
     const diamond = new THREE.Mesh(
-      new THREE.CircleGeometry(0.25, 4),
+      new THREE.CircleGeometry(active ? 0.29 : 0.22, 4),
       new THREE.MeshBasicMaterial({
-        color: 0x38e4c5,
+        color: palette[Math.min(index, palette.length - 1)],
         transparent: true,
         opacity: 0.82,
         side: THREE.DoubleSide,
@@ -515,6 +564,25 @@ export class TorusBoard {
     center.position.copy(centerFrame.position);
     center.quaternion.setFromUnitVectors(LOCAL_FORWARD, centerFrame.normal);
     this.markersGroup.add(center);
+  }
+
+  addVariationMarker(row, col, entry = null, index = 0) {
+    if (
+      !Number.isInteger(row) || !Number.isInteger(col) ||
+      row < 0 || row >= this.height || col < 0 || col >= this.width
+    ) return;
+    const frame = this.frame(row, col, 0.278);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.098, 0.138 + Math.min(index, 4) * 0.006, 28),
+      new THREE.MeshBasicMaterial({
+        color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
+        side: THREE.DoubleSide,
+        depthTest: true,
+      }),
+    );
+    ring.position.copy(frame.position);
+    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
+    this.markersGroup.add(ring);
   }
 
   addReferenceMarker(row, col, occupied) {
@@ -560,7 +628,12 @@ export class TorusBoard {
     if (!hit) return null;
 
     const point = this.boardGroup.worldToLocal(hit.point.clone());
-    return torusGridPointFromCartesian(point, this.size, this.majorRadius);
+    return torusGridPointFromCartesian(
+      point,
+      this.width,
+      this.height,
+      this.majorRadius,
+    );
   }
 
   handlePointerDown(event) {
@@ -690,9 +763,9 @@ export class TorusBoard {
       !Number.isInteger(point?.row) ||
       !Number.isInteger(point?.col) ||
       point.row < 0 ||
-      point.row >= this.size ||
+      point.row >= this.height ||
       point.col < 0 ||
-      point.col >= this.size
+      point.col >= this.width
     ) {
       return;
     }

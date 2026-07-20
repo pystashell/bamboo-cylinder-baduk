@@ -68,16 +68,23 @@ function starIndices(size) {
 }
 
 export class CylinderBoard {
-  constructor(container, { size = 19, onPoint, onHover } = {}) {
+  constructor(container, { size, width, height, onPoint, onHover } = {}) {
+    const fallbackDimension = size ?? width ?? height ?? 19;
+    const boardWidth = width ?? fallbackDimension;
+    const boardHeight = height ?? fallbackDimension;
     this.container = container;
     this.onPoint = onPoint;
     this.onHover = onHover;
-    this.size = size;
+    this.width = boardWidth;
+    this.height = boardHeight;
+    this.size = boardWidth === boardHeight ? boardWidth : undefined;
     this.board = [];
     this.phase = "play";
     this.currentPlayer = "black";
     this.lastMove = null;
     this.analysisMove = null;
+    this.analysisCandidates = [];
+    this.analysisVariation = [];
     this.referencePoint = null;
     this.deadKeys = new Set();
     this.pointerStart = null;
@@ -149,19 +156,24 @@ export class CylinderBoard {
     canvas.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("pointerleave", this.onPointerLeave);
 
-    this.rebuild(size);
+    this.rebuild(boardWidth, boardHeight);
     this.animate();
   }
 
-  rebuild(size) {
-    this.size = size;
+  rebuild(width, height = width) {
+    this.width = width;
+    this.height = height;
+    this.size = width === height ? width : undefined;
     this.analysisMove = null;
+    this.analysisCandidates = [];
+    this.analysisVariation = [];
     this.referencePoint = null;
-    this.radius = (size * CELL) / TAU;
-    this.gridHeight = (size - 1) * CELL;
+    this.radius = (width * CELL) / TAU;
+    this.gridHeight = (height - 1) * CELL;
     this.edgeMargin = 0.52;
     this.surfaceHeight = this.gridHeight + this.edgeMargin * 2;
-    this.radialSegments = Math.max(96, size * 8);
+    this.radialSegments = Math.max(96, width * 8);
+    this.board = Array.from({ length: height }, () => Array(width).fill(null));
 
     if (this.boardGroup) {
       this.scene.remove(this.boardGroup);
@@ -239,7 +251,7 @@ export class CylinderBoard {
     });
     const gridRadius = this.radius + 0.015;
 
-    for (let row = 0; row < this.size; row += 1) {
+    for (let row = 0; row < this.height; row += 1) {
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(gridRadius, 0.0155, 5, this.radialSegments),
         gridMaterial,
@@ -249,7 +261,7 @@ export class CylinderBoard {
       this.boardGroup.add(ring);
     }
 
-    for (let col = 0; col < this.size; col += 1) {
+    for (let col = 0; col < this.width; col += 1) {
       const theta = this.colTheta(col);
       const meridian = new THREE.Mesh(
         new THREE.CylinderGeometry(0.0155, 0.0155, this.gridHeight, 5),
@@ -267,9 +279,10 @@ export class CylinderBoard {
       color: 0x1c1510,
       roughness: 0.65,
     });
-    const stars = starIndices(this.size);
-    for (const row of stars) {
-      for (const col of stars) {
+    const rowStars = starIndices(this.height);
+    const columnStars = starIndices(this.width);
+    for (const row of rowStars) {
+      for (const col of columnStars) {
         const frame = this.frame(row, col, 0.052);
         const star = new THREE.Mesh(
           new THREE.SphereGeometry(0.074, 12, 8),
@@ -343,7 +356,7 @@ export class CylinderBoard {
   }
 
   colTheta(col) {
-    return (col * TAU) / this.size;
+    return (col * TAU) / this.width;
   }
 
   frame(row, col, offset = 0) {
@@ -362,25 +375,41 @@ export class CylinderBoard {
 
   setPosition({
     board,
+    size,
+    width,
+    height,
     currentPlayer,
     phase,
     lastMove,
     deadStones = [],
     analysisMove = null,
+    analysisCandidates = [],
+    analysisVariation = [],
     referencePoint = null,
   }) {
+    const nextWidth = width ?? size ?? this.width;
+    const nextHeight = height ?? size ?? this.height;
+    if (nextWidth !== this.width || nextHeight !== this.height) {
+      this.rebuild(nextWidth, nextHeight);
+    }
     this.board = board;
     this.currentPlayer = currentPlayer;
     this.phase = phase;
     this.lastMove = lastMove;
     this.analysisMove = analysisMove?.type === "play" ? analysisMove : null;
+    this.analysisCandidates = Array.isArray(analysisCandidates)
+      ? analysisCandidates.slice(0, 5)
+      : [];
+    this.analysisVariation = Array.isArray(analysisVariation)
+      ? analysisVariation.slice(0, 8)
+      : [];
     this.referencePoint =
       Number.isInteger(referencePoint?.row) &&
       Number.isInteger(referencePoint?.col) &&
       referencePoint.row >= 0 &&
-      referencePoint.row < this.size &&
+      referencePoint.row < this.height &&
       referencePoint.col >= 0 &&
-      referencePoint.col < this.size
+      referencePoint.col < this.width
         ? { row: referencePoint.row, col: referencePoint.col }
         : null;
     this.deadKeys = new Set(deadStones.map(({ row, col }) => `${row},${col}`));
@@ -395,8 +424,8 @@ export class CylinderBoard {
       marker.material.dispose();
     }
 
-    for (let row = 0; row < this.size; row += 1) {
-      for (let col = 0; col < this.size; col += 1) {
+    for (let row = 0; row < this.height; row += 1) {
+      for (let col = 0; col < this.width; col += 1) {
         const color = board[row][col];
         if (!color) continue;
         const dead = this.deadKeys.has(`${row},${col}`);
@@ -419,17 +448,34 @@ export class CylinderBoard {
       this.addLastMoveMarker(lastMove.row, lastMove.col);
     }
     if (
+      this.analysisCandidates.length === 0 &&
       this.analysisMove &&
       Number.isInteger(this.analysisMove.row) &&
       Number.isInteger(this.analysisMove.col) &&
       this.analysisMove.row >= 0 &&
-      this.analysisMove.row < this.size &&
+      this.analysisMove.row < this.height &&
       this.analysisMove.col >= 0 &&
-      this.analysisMove.col < this.size &&
+      this.analysisMove.col < this.width &&
       !board[this.analysisMove.row]?.[this.analysisMove.col]
     ) {
       this.addAnalysisMarker(this.analysisMove.row, this.analysisMove.col);
     }
+    this.analysisCandidates.forEach((candidate, index) => {
+      const move = candidate?.move ?? candidate;
+      if (
+        move?.type === "play" &&
+        Number.isInteger(move.row) && Number.isInteger(move.col) &&
+        move.row >= 0 && move.row < this.height &&
+        move.col >= 0 && move.col < this.width &&
+        !board[move.row]?.[move.col]
+      ) {
+        this.addAnalysisMarker(move.row, move.col, candidate, index);
+      }
+    });
+    this.analysisVariation.forEach((entry, index) => {
+      const move = entry?.move ?? entry;
+      if (move?.type === "play") this.addVariationMarker(move.row, move.col, entry, index);
+    });
     if (this.referencePoint) {
       this.addReferenceMarker(
         this.referencePoint.row,
@@ -462,12 +508,14 @@ export class CylinderBoard {
     this.markersGroup.add(marker);
   }
 
-  addAnalysisMarker(row, col) {
+  addAnalysisMarker(row, col, candidate = null, index = 0) {
+    const palette = [0x38e4c5, 0x6c9eff, 0xb58cff, 0xe7a853, 0xe96f78];
+    const active = Boolean(candidate?.active);
     const diamondFrame = this.frame(row, col, 0.07);
     const diamond = new THREE.Mesh(
-      new THREE.CircleGeometry(0.27, 4),
+      new THREE.CircleGeometry(active ? 0.31 : 0.24, 4),
       new THREE.MeshBasicMaterial({
-        color: 0x38e4c5,
+        color: palette[Math.min(index, palette.length - 1)],
         transparent: true,
         opacity: 0.82,
         side: THREE.DoubleSide,
@@ -492,6 +540,25 @@ export class CylinderBoard {
     center.position.copy(centerFrame.position);
     center.quaternion.setFromUnitVectors(LOCAL_FORWARD, centerFrame.normal);
     this.markersGroup.add(center);
+  }
+
+  addVariationMarker(row, col, entry = null, index = 0) {
+    if (
+      !Number.isInteger(row) || !Number.isInteger(col) ||
+      row < 0 || row >= this.height || col < 0 || col >= this.width
+    ) return;
+    const frame = this.frame(row, col, 0.286);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.105, 0.145 + Math.min(index, 4) * 0.006, 28),
+      new THREE.MeshBasicMaterial({
+        color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
+        side: THREE.DoubleSide,
+        depthTest: true,
+      }),
+    );
+    ring.position.copy(frame.position);
+    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
+    this.markersGroup.add(ring);
   }
 
   addReferenceMarker(row, col, occupied) {
@@ -539,9 +606,9 @@ export class CylinderBoard {
     const point = this.boardGroup.worldToLocal(hit.point.clone());
     let theta = Math.atan2(point.x, point.z);
     theta = ((theta % TAU) + TAU) % TAU;
-    const col = Math.round(theta / (TAU / this.size)) % this.size;
+    const col = Math.round(theta / (TAU / this.width)) % this.width;
     const row = Math.round((this.gridHeight / 2 - point.y) / CELL);
-    if (row < 0 || row >= this.size) return null;
+    if (row < 0 || row >= this.height) return null;
     if (Math.abs(point.y - this.rowY(row)) > CELL * 0.5) return null;
     return { row, col };
   }
@@ -632,9 +699,9 @@ export class CylinderBoard {
       !Number.isInteger(point?.row) ||
       !Number.isInteger(point?.col) ||
       point.row < 0 ||
-      point.row >= this.size ||
+      point.row >= this.height ||
       point.col < 0 ||
-      point.col >= this.size
+      point.col >= this.width
     ) {
       return;
     }

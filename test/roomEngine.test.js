@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MAX_SPECTATORS,
   ROOM_TTL_MS,
+  SPECTATOR_COMMAND_MEMBER_BURST,
+  SPECTATOR_COMMAND_MEMBER_REFILL_MS,
+  SPECTATOR_COMMAND_ROOM_BURST,
+  SPECTATOR_COMMAND_ROOM_REFILL_MS,
+  SPECTATOR_RECONNECT_GRACE_MS,
+  SPECTATOR_RESERVATION_TTL_MS,
   RoomEngine,
   RoomEngineError,
 } from "../src/multiplayer/roomEngine.js";
@@ -11,6 +18,10 @@ import { CHAT_HISTORY_MAX_BYTES } from "../src/multiplayer/chat.js";
 const BLACK_HASH = "a".repeat(64);
 const WHITE_HASH = "b".repeat(64);
 const VIEWER_HASH = "c".repeat(64);
+
+function spectatorHash(index) {
+  return index.toString(16).padStart(64, "0");
+}
 
 function createRoom(now = 1_000) {
   return RoomEngine.create({
@@ -471,6 +482,43 @@ test("supports pass, scoring controls, resume and a black-controlled new game", 
   assert.equal(fresh.room.game.komi, 7.5);
   assert.equal(fresh.room.game.scoringRule, "chinese");
   assert.equal(fresh.room.moveCount, 0);
+});
+
+test("rectangular rooms create, persist, play and start another rectangular game", () => {
+  const room = RoomEngine.create({
+    code: "REC234",
+    name: "黑方",
+    width: 13,
+    height: 9,
+    topology: "torus",
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 1_100);
+  const played = room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 8, col: 12 },
+    now: 1_200,
+  });
+  assert.equal(played.room.game.width, 13);
+  assert.equal(played.room.game.height, 9);
+  assert.equal("size" in played.room.game, false);
+  assert.equal(played.room.game.board.length, 9);
+  assert.equal(played.room.game.board[0].length, 13);
+
+  const restored = RoomEngine.restore(room.serialize());
+  assert.equal(restored.snapshot(1_300).game.board[8][12], "black");
+  const fresh = restored.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: { width: 9, height: 13, topology: "mobius" },
+    now: 1_400,
+  });
+  assert.equal(fresh.room.game.width, 9);
+  assert.equal(fresh.room.game.height, 13);
+  assert.equal(fresh.room.game.topology, "mobius");
 });
 
 test("lets the host switch topology for a new game and rejects invalid topology", () => {
@@ -1221,6 +1269,43 @@ test("players can chat without changing the game revision or censoring text", ()
   );
 });
 
+test("rectangular room chat survives snapshots and persistence with both dimensions", () => {
+  const room = RoomEngine.create({
+    code: "CHT234",
+    name: "黑方",
+    width: 13,
+    height: 9,
+    topology: "torus",
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 1_100);
+
+  const posted = room.postChat({
+    playerId: "black-player",
+    sequence: 1,
+    payload: { kind: "text", text: "看 M9 和 A1" },
+    now: 2_000,
+  });
+
+  assert.equal(posted.message.boardWidth, 13);
+  assert.equal(posted.message.boardHeight, 9);
+  assert.equal("boardSize" in posted.message, false);
+  assert.deepEqual(posted.message.points, [
+    { row: 0, col: 11, label: "M9" },
+    { row: 8, col: 0, label: "A1" },
+  ]);
+
+  const snapshot = room.snapshot(2_001);
+  assert.equal(snapshot.chat.messages.length, 1);
+  assert.equal(snapshot.chat.messages[0].boardWidth, 13);
+  assert.equal(snapshot.chat.messages[0].boardHeight, 9);
+
+  const restored = RoomEngine.restore(room.serialize()).snapshot(2_002);
+  assert.deepEqual(restored.chat.messages, snapshot.chat.messages);
+});
+
 test("spectators cannot send chat and sticker ids are server validated", () => {
   const room = createRoom();
   joinWhite(room);
@@ -1483,4 +1568,446 @@ test("long text chat stays within 64 KiB across snapshots and restoration", () =
   assert.ok(continuedBytes <= CHAT_HISTORY_MAX_BYTES);
   assert.equal(continued.chat.sequence, 101);
   assert.equal(continued.chat.messages.at(-1).sequence, 101);
+});
+
+test("legacy and default rooms remain untimed", () => {
+  const room = createRoom(1_000);
+  assert.equal(room.snapshot(1_001).timeControl, null);
+
+  const legacy = room.serialize();
+  delete legacy.timeControl;
+  const restored = RoomEngine.restore(legacy);
+  assert.equal(restored.snapshot(1_002).timeControl, null);
+  assert.equal(restored.nextDueAt(), restored.state.expiresAt);
+});
+
+test("an authoritative clock waits for both seats, deducts the mover, and survives restoration", () => {
+  const room = RoomEngine.create({
+    code: "CLK234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 10,
+    byoYomiPeriods: 3,
+    byoYomiSeconds: 5,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  assert.equal(room.snapshot(1_500).timeControl.running, false);
+
+  joinWhite(room, 2_000);
+  const started = room.snapshot(2_000).timeControl;
+  assert.equal(started.activeColor, "black");
+  assert.equal(started.serverNow, 2_000);
+  assert.equal(started.turnDeadlineAt, 27_000);
+  assert.equal(room.nextDueAt(), 27_000);
+
+  room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 4, col: 4 },
+    now: 8_000,
+  });
+  const switched = room.snapshot(8_000).timeControl;
+  assert.equal(switched.players.black.mainTimeRemainingMs, 4_000);
+  assert.equal(switched.activeColor, "white");
+  assert.equal(switched.players.white.mainTimeRemainingMs, 10_000);
+
+  const restored = RoomEngine.restore(room.serialize());
+  const projected = restored.snapshot(11_000).timeControl;
+  assert.equal(projected.activeColor, "white");
+  assert.equal(projected.players.white.mainTimeRemainingMs, 7_000);
+  assert.equal(restored.nextDueAt(), 33_000);
+});
+
+test("server time wins races at the exact deadline and rejects all later moves", () => {
+  const room = RoomEngine.create({
+    code: "FLG234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 0,
+    byoYomiPeriods: 2,
+    byoYomiSeconds: 5,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 2_000);
+  assert.equal(room.timeControlDueAt(), 12_000);
+  assert.equal(room.advance(11_999).changed, false);
+
+  assert.throws(
+    () =>
+      room.applyAction({
+        playerId: "black-player",
+        action: "play",
+        payload: { row: 0, col: 0 },
+        now: 12_000,
+      }),
+    (error) => error instanceof RoomEngineError && error.code === "GAME_TIMED_OUT",
+  );
+  assert.equal(room.game.get(0, 0), null);
+  const snapshot = room.snapshot(12_001);
+  assert.equal(snapshot.game.phase, "finished");
+  assert.deepEqual(snapshot.game.result, {
+    winner: "white",
+    loser: "black",
+    margin: 0,
+    reason: "timeout",
+    finishedAt: 12_000,
+  });
+  assert.equal(snapshot.timeControl.running, false);
+  assert.equal(snapshot.timeControl.outcome.winner, "white");
+  assert.equal(room.timeControlDueAt(), null);
+  assert.ok(room.nextDueAt() > 12_000);
+
+  assert.throws(
+    () =>
+      room.applyAction({
+        playerId: "white-player",
+        action: "pass",
+        now: 12_100,
+      }),
+    (error) => error instanceof RoomEngineError && error.code === "GAME_TIMED_OUT",
+  );
+});
+
+test("advance materializes an alarm timeout and keeps the room TTL scheduled", () => {
+  const room = RoomEngine.create({
+    code: "ALM234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 3,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 2_000);
+  const revision = room.snapshot(2_000).revision;
+  const advanced = room.advance(5_000);
+  assert.equal(advanced.changed, true);
+  assert.equal(advanced.expired, false);
+  assert.equal(advanced.timedOut, true);
+  assert.equal(advanced.revision, revision + 1);
+  assert.equal(advanced.room.timeControl.outcome.winner, "white");
+  assert.equal(advanced.nextDueAt, room.state.expiresAt);
+  assert.equal(advanced.nextDueAt, 5_000 + ROOM_TTL_MS);
+  const restored = RoomEngine.restore(room.serialize()).snapshot(5_001);
+  assert.equal(restored.game.phase, "finished");
+  assert.equal(restored.timeControl.outcome.finishedAt, 5_000);
+});
+
+test("invalid clock settings are transactional and corrupted clock persistence is rejected", () => {
+  const room = RoomEngine.create({
+    code: "BAD234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 10,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 2_000);
+  const before = room.serialize();
+  assert.throws(
+    () =>
+      room.applyAction({
+        playerId: "black-player",
+        action: "new_game",
+        payload: { size: 13, byoYomiPeriods: 2, byoYomiSeconds: 0 },
+        now: 3_000,
+      }),
+    (error) => error instanceof RoomEngineError && error.code === "BAD_REQUEST",
+  );
+  assert.deepEqual(room.serialize(), before);
+
+  const corrupted = structuredClone(before);
+  corrupted.timeControl.players.black.mainTimeRemainingMs = -1;
+  assert.throws(
+    () => RoomEngine.restore(corrupted),
+    (error) => error instanceof RoomEngineError && error.code === "BAD_ROOM_STATE",
+  );
+});
+
+test("clocks pause outside play and a new game can replace or disable its settings", () => {
+  const room = RoomEngine.create({
+    code: "PAU234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 20,
+    byoYomiPeriods: 1,
+    byoYomiSeconds: 5,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 2_000);
+  room.applyAction({ playerId: "black-player", action: "pass", now: 3_000 });
+  room.applyAction({ playerId: "white-player", action: "pass", now: 4_000 });
+  const scoring = room.snapshot(4_000).timeControl;
+  assert.equal(room.game.phase, "scoring");
+  assert.equal(scoring.running, false);
+  assert.equal(scoring.players.black.mainTimeRemainingMs, 19_000);
+  assert.equal(scoring.players.white.mainTimeRemainingMs, 19_000);
+  assert.equal(room.timeControlDueAt(), null);
+  assert.equal(room.snapshot(40_000).timeControl.players.white.mainTimeRemainingMs, 19_000);
+
+  room.applyAction({ playerId: "black-player", action: "resume_play", now: 40_000 });
+  assert.equal(room.snapshot(41_000).timeControl.running, true);
+
+  const fresh = room.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: {
+      mainTimeSeconds: 0,
+      byoYomiPeriods: 3,
+      byoYomiSeconds: 10,
+    },
+    now: 42_000,
+  });
+  assert.equal(fresh.room.timeControl.mainTimeSeconds, 0);
+  assert.equal(fresh.room.timeControl.byoYomiPeriods, 3);
+  assert.equal(fresh.room.timeControl.activeColor, "black");
+  assert.equal(fresh.room.timeControl.turnDeadlineAt, 72_000);
+
+  const untimed = room.applyAction({
+    playerId: "black-player",
+    action: "new_game",
+    payload: {
+      mainTimeSeconds: 0,
+      byoYomiPeriods: 0,
+      byoYomiSeconds: 0,
+    },
+    now: 43_000,
+  });
+  assert.equal(untimed.room.timeControl, null);
+});
+
+test("pending undo pauses the current clock without refunding elapsed time", () => {
+  const room = RoomEngine.create({
+    code: "UND234",
+    name: "黑方",
+    size: 9,
+    mainTimeSeconds: 30,
+    playerId: "black-player",
+    tokenHash: BLACK_HASH,
+    now: 1_000,
+  });
+  joinWhite(room, 2_000);
+  room.applyAction({
+    playerId: "black-player",
+    action: "play",
+    payload: { row: 4, col: 4 },
+    now: 3_000,
+  });
+  room.applyAction({
+    playerId: "black-player",
+    action: "request_undo",
+    payload: { expectedMoveCount: 1 },
+    now: 8_000,
+  });
+  const paused = room.snapshot(20_000);
+  assert.equal(paused.timeControl.running, false);
+  assert.equal(paused.timeControl.players.white.mainTimeRemainingMs, 25_000);
+
+  room.applyAction({
+    playerId: "white-player",
+    action: "respond_undo",
+    payload: {
+      accept: false,
+      targetMoveCount: 1,
+      requestRevision: paused.undoRequest.requestRevision,
+    },
+    now: 20_000,
+  });
+  const resumed = room.snapshot(21_000).timeControl;
+  assert.equal(resumed.activeColor, "white");
+  assert.equal(resumed.players.white.mainTimeRemainingMs, 24_000);
+});
+
+test("abandoned spectator reservations expire and cannot permanently fill a room", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  const reservedAt = 2_000;
+
+  for (let index = 0; index < MAX_SPECTATORS; index += 1) {
+    room.join({
+      name: `Viewer ${index}`,
+      role: "spectator",
+      playerId: `reserved-viewer-${index}`,
+      tokenHash: spectatorHash(index),
+      now: reservedAt,
+    });
+  }
+  assert.equal(room.spectatorCount(), MAX_SPECTATORS);
+  assert.equal(room.nextDueAt(), reservedAt + SPECTATOR_RESERVATION_TTL_MS);
+  assert.throws(
+    () =>
+      room.join({
+        name: "Too early",
+        role: "spectator",
+        playerId: "early-viewer",
+        tokenHash: "d".repeat(64),
+        now: reservedAt + SPECTATOR_RESERVATION_TTL_MS - 1,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "SPECTATOR_FULL",
+  );
+
+  const replacement = room.join({
+    name: "Replacement",
+    role: "spectator",
+    playerId: "replacement-viewer",
+    tokenHash: "e".repeat(64),
+    now: reservedAt + SPECTATOR_RESERVATION_TTL_MS,
+  });
+  assert.equal(replacement.identity.role, "spectator");
+  assert.equal(room.spectatorCount(), 1);
+  assert.deepEqual(
+    room.snapshot(reservedAt + SPECTATOR_RESERVATION_TTL_MS).players.map(
+      (player) => player.color,
+    ),
+    ["black", "white"],
+  );
+});
+
+test("connected spectators are protected and get a bounded reconnect grace", () => {
+  const room = createRoom(1_000);
+  joinWhite(room, 1_100);
+  room.join({
+    name: "Connected viewer",
+    role: "spectator",
+    playerId: "connected-viewer",
+    tokenHash: VIEWER_HASH,
+    now: 2_000,
+  });
+  room.resumeConnection("connected-viewer", "viewer-socket", 2_500);
+
+  const hibernated = RoomEngine.restore(room.serialize());
+  const wakeAt = 2_500 + SPECTATOR_RECONNECT_GRACE_MS + 1;
+  hibernated.resumeConnection("connected-viewer", "restored-viewer-socket", wakeAt);
+  assert.equal(hibernated.advance(wakeAt).evictedSpectators, undefined);
+  assert.equal(hibernated.spectatorCount(), 1);
+
+  const wellPastReservation = 2_000 + SPECTATOR_RESERVATION_TTL_MS * 3;
+  assert.equal(room.advance(wellPastReservation).evictedSpectators, undefined);
+  assert.equal(room.spectatorCount(), 1);
+
+  room.disconnect({ connectionId: "viewer-socket", now: wellPastReservation });
+  assert.equal(
+    room.nextDueAt(),
+    wellPastReservation + SPECTATOR_RECONNECT_GRACE_MS,
+  );
+  assert.equal(
+    room.advance(
+      wellPastReservation + SPECTATOR_RECONNECT_GRACE_MS - 1,
+    ).changed,
+    false,
+  );
+  const evicted = room.advance(
+    wellPastReservation + SPECTATOR_RECONNECT_GRACE_MS,
+  );
+  assert.equal(evicted.evictedSpectators, 1);
+  assert.equal(room.spectatorCount(), 0);
+  assert.equal(room.snapshot(wellPastReservation + SPECTATOR_RECONNECT_GRACE_MS).players.length, 2);
+});
+
+test("spectator command budgets are persistent, bounded and do not affect players", () => {
+  const room = createRoom(1_000);
+  room.join({
+    name: "Viewer",
+    role: "spectator",
+    playerId: "rate-viewer",
+    tokenHash: VIEWER_HASH,
+    now: 2_000,
+  });
+
+  for (let index = 0; index < SPECTATOR_COMMAND_MEMBER_BURST; index += 1) {
+    room.enforceSpectatorCommandRateLimit({
+      playerId: "rate-viewer",
+      action: "sync",
+      now: 2_100,
+    });
+  }
+  assert.throws(
+    () =>
+      room.enforceSpectatorCommandRateLimit({
+        playerId: "rate-viewer",
+        action: "sync",
+        now: 2_100,
+      }),
+    (error) =>
+      error instanceof RoomEngineError &&
+      error.code === "SPECTATOR_RATE_LIMITED" &&
+      error.retryable,
+  );
+
+  const restored = RoomEngine.restore(room.serialize());
+  assert.throws(
+    () =>
+      restored.enforceSpectatorCommandRateLimit({
+        playerId: "rate-viewer",
+        action: "sync",
+        now: 2_100,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "SPECTATOR_RATE_LIMITED",
+  );
+  restored.enforceSpectatorCommandRateLimit({
+    playerId: "rate-viewer",
+    action: "sync",
+    now: 2_100 + SPECTATOR_COMMAND_MEMBER_REFILL_MS,
+  });
+
+  for (let index = 0; index < 50; index += 1) {
+    restored.enforceSpectatorCommandRateLimit({
+      playerId: "black-player",
+      action: "sync",
+      now: 2_100,
+    });
+  }
+  for (let index = 0; index < 50; index += 1) {
+    restored.enforceSpectatorCommandRateLimit({
+      playerId: "rate-viewer",
+      action: "leave",
+      now: 2_100,
+    });
+  }
+});
+
+test("all spectators share a room command budget in addition to member budgets", () => {
+  const room = createRoom(1_000);
+  const viewerCount = Math.ceil(SPECTATOR_COMMAND_ROOM_BURST / 2);
+  for (let index = 0; index < viewerCount; index += 1) {
+    room.join({
+      name: `Rate viewer ${index}`,
+      role: "spectator",
+      playerId: `rate-viewer-${index}`,
+      tokenHash: spectatorHash(index),
+      now: 2_000,
+    });
+  }
+
+  for (let index = 0; index < SPECTATOR_COMMAND_ROOM_BURST; index += 1) {
+    room.enforceSpectatorCommandRateLimit({
+      playerId: `rate-viewer-${Math.floor(index / 2)}`,
+      action: "sync",
+      now: 2_100,
+    });
+  }
+  assert.throws(
+    () =>
+      room.enforceSpectatorCommandRateLimit({
+        playerId: "rate-viewer-0",
+        action: "sync",
+        now: 2_100,
+      }),
+    (error) =>
+      error instanceof RoomEngineError && error.code === "SPECTATOR_RATE_LIMITED",
+  );
+  room.enforceSpectatorCommandRateLimit({
+    playerId: "rate-viewer-0",
+    action: "sync",
+    now: 2_100 + SPECTATOR_COMMAND_ROOM_REFILL_MS,
+  });
 });

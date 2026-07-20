@@ -137,11 +137,61 @@
               </div>
               <div class="room-actions">
                 <button id="change-ai-settings" class="secondary-button" type="button">更换 AI 设置</button>
+                <button id="toggle-ai-autoplay" class="secondary-button" type="button" hidden>暂停对弈</button>
                 <button id="leave-ai" class="text-button" type="button">退出 AI</button>
               </div>
               <p id="ai-hint" class="room-hint">轮到你落子。</p>
             </div>
           </section>
+
+          <section id="clock-panel" class="clock-panel" aria-label="双方用时">
+            <article id="black-clock-card" class="clock-card active" data-color="black">
+              <span class="stone black" aria-hidden="true"></span>
+              <span class="clock-player">
+                <strong id="black-clock-name">黑方</strong>
+                <small id="black-clock-status">准备落子</small>
+              </span>
+              <span class="clock-reading">
+                <strong id="black-clock-time">不计时</strong>
+                <small id="black-clock-periods">自由用时</small>
+              </span>
+            </article>
+            <article id="white-clock-card" class="clock-card" data-color="white">
+              <span class="stone white" aria-hidden="true"></span>
+              <span class="clock-player">
+                <strong id="white-clock-name">白方</strong>
+                <small id="white-clock-status">等待黑方</small>
+              </span>
+              <span class="clock-reading">
+                <strong id="white-clock-time">不计时</strong>
+                <small id="white-clock-periods">自由用时</small>
+              </span>
+            </article>
+          </section>
+
+          <nav class="sidebar-tabs" aria-label="侧栏功能">
+            <button type="button" data-sidebar-tab="game" class="active" aria-selected="true" aria-controls="sidebar-panel-game">
+              <span aria-hidden="true">●</span><b>对局</b>
+            </button>
+            <button type="button" data-sidebar-tab="analysis" aria-selected="false" aria-controls="sidebar-panel-analysis">
+              <span aria-hidden="true">◇</span><b>分析</b>
+            </button>
+            <button type="button" data-sidebar-tab="chat" aria-selected="false" aria-controls="sidebar-panel-chat">
+              <span aria-hidden="true">✦</span><b>聊天</b>
+            </button>
+            <button type="button" data-sidebar-tab="record" aria-selected="false" aria-controls="sidebar-panel-record">
+              <span aria-hidden="true">▶</span><b>棋谱</b>
+            </button>
+            <button type="button" data-sidebar-tab="settings" aria-selected="false" aria-controls="sidebar-panel-settings">
+              <span aria-hidden="true">⚙</span><b>设置</b>
+            </button>
+          </nav>
+
+          <div id="sidebar-panel-game" class="sidebar-panel" data-sidebar-panel="game" role="tabpanel"></div>
+          <div id="sidebar-panel-analysis" class="sidebar-panel" data-sidebar-panel="analysis" role="tabpanel" hidden></div>
+          <div id="sidebar-panel-chat" class="sidebar-panel" data-sidebar-panel="chat" role="tabpanel" hidden></div>
+          <div id="sidebar-panel-record" class="sidebar-panel" data-sidebar-panel="record" role="tabpanel" hidden></div>
+          <div id="sidebar-panel-settings" class="sidebar-panel" data-sidebar-panel="settings" role="tabpanel" hidden></div>
 
           <section id="chat-panel" class="chat-panel" aria-label="房间聊天" hidden>
             <div class="chat-heading">
@@ -225,6 +275,19 @@
             <span class="replay-entry-arrow" aria-hidden="true">›</span>
           </button>
 
+          <section class="record-actions" aria-labelledby="record-actions-title">
+            <div>
+              <span class="eyebrow">SGF 棋谱</span>
+              <strong id="record-actions-title">保存或打开异形棋谱</strong>
+              <small>标准棋步保持兼容，接缝规则写入 3D Baduk 扩展属性</small>
+            </div>
+            <div class="record-action-buttons">
+              <button id="export-sgf" class="secondary-button" type="button">导出 SGF</button>
+              <button id="import-sgf" class="secondary-button" type="button">导入 SGF</button>
+              <input id="import-sgf-file" type="file" accept=".sgf,application/x-go-sgf,text/plain" hidden />
+            </div>
+          </section>
+
           <section id="replay-panel" class="replay-panel" aria-label="复盘播放器" hidden>
             <div class="replay-panel-heading">
               <span>
@@ -247,11 +310,11 @@
               <button id="replay-last" class="secondary-button" type="button" aria-label="跳到结尾" title="跳到结尾">›|</button>
             </div>
 
-            <section id="ai-review-panel" class="ai-review-panel" aria-label="KataGo AI 复盘">
+            <section id="ai-review-panel" class="ai-review-panel" aria-label="KataGo AI 局势分析">
               <div class="ai-review-heading">
                 <span>
-                  <span class="eyebrow">AI 复盘</span>
-                  <strong>KataGo 棋局参考</strong>
+                  <span id="ai-review-eyebrow" class="eyebrow">AI 局势分析</span>
+                  <strong id="ai-review-title">KataGo 候选与变化</strong>
                 </span>
                 <label class="ai-review-model" for="ai-review-model">
                   <span>分析模型</span>
@@ -265,7 +328,7 @@
               <p id="ai-review-model-note" class="ai-review-model-note"></p>
 
               <p id="ai-review-status" class="ai-review-status" aria-live="polite">
-                停在任意一手，查看 AI 在当时更偏好的下法。
+                分析当前局面，棋盘会同时标出多个候选点。
               </p>
 
               <div class="ai-review-actions">
@@ -281,6 +344,12 @@
                 </div>
                 <p id="ai-review-comparison"></p>
                 <ol id="ai-review-candidates" class="ai-review-candidates"></ol>
+                <div id="ai-variation-preview" class="ai-variation-preview" hidden>
+                  <span>变化图</span>
+                  <strong id="ai-variation-title">候选 1</strong>
+                  <p id="ai-variation-line"></p>
+                  <small>悬停临时查看，点击候选可固定；再次点击取消。</small>
+                </div>
               </div>
 
               <p class="ai-review-disclaimer">
@@ -356,13 +425,22 @@
               </div>
             </div>
 
-            <label class="input-row" for="custom-size">
-              <span>
-                <strong>自定义尺寸</strong>
-                <small>5–25路</small>
-              </span>
-              <input id="custom-size" type="number" min="5" max="25" step="1" value="19" inputmode="numeric" />
-            </label>
+            <div class="dimension-fields" role="group" aria-label="自定义棋盘宽度与高度">
+              <label class="input-row" for="custom-width">
+                <span>
+                  <strong>宽度</strong>
+                  <small>横向列数 · 5–25</small>
+                </span>
+                <input id="custom-width" type="number" min="5" max="25" step="1" value="19" inputmode="numeric" />
+              </label>
+              <label class="input-row" for="custom-height">
+                <span>
+                  <strong>高度</strong>
+                  <small>纵向行数 · 5–25</small>
+                </span>
+                <input id="custom-height" type="number" min="5" max="25" step="1" value="19" inputmode="numeric" />
+              </label>
+            </div>
 
             <label class="input-row" for="scoring-rule">
               <span>
@@ -382,6 +460,41 @@
               </span>
               <input id="komi" type="number" min="0" max="20" step="0.5" value="7.5" />
             </label>
+
+            <div class="time-control-settings" aria-labelledby="time-control-title">
+              <div class="section-heading compact-heading">
+                <h3 id="time-control-title">计时与读秒</h3>
+                <span>新棋盘时生效</span>
+              </div>
+              <label class="input-row" for="time-control-preset">
+                <span>
+                  <strong>用时方案</strong>
+                  <small>日本式读秒</small>
+                </span>
+                <select id="time-control-preset">
+                  <option value="none">不计时</option>
+                  <option value="blitz">快棋 · 5 分钟 + 3×20 秒</option>
+                  <option value="standard">标准 · 20 分钟 + 5×30 秒</option>
+                  <option value="long">长考 · 45 分钟 + 5×60 秒</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+              <div id="custom-time-fields" class="time-fields" hidden>
+                <label>
+                  <span>基本时间（分钟）</span>
+                  <input id="main-time-minutes" type="number" min="0" max="180" step="1" value="20" inputmode="numeric" />
+                </label>
+                <label>
+                  <span>读秒次数</span>
+                  <input id="byo-yomi-periods" type="number" min="1" max="20" step="1" value="5" inputmode="numeric" />
+                </label>
+                <label>
+                  <span>每次读秒（秒）</span>
+                  <input id="byo-yomi-seconds" type="number" min="5" max="300" step="5" value="30" inputmode="numeric" />
+                </label>
+              </div>
+              <p class="time-control-note">基本时间耗尽后进入读秒；超出一整段会失去一次读秒，最后一次耗尽即判超时负。</p>
+            </div>
           </section>
 
           <details class="rules-note">
@@ -416,6 +529,7 @@
             <a href="/KATAGO_NETWORK_LICENSE.txt" target="_blank" rel="license noopener">
               KataGo 模型版权与许可
             </a>
+            <span id="app-version">开发版</span>
           </p>
         </aside>
       </main>
@@ -425,7 +539,7 @@
       <form id="online-form">
         <span class="eyebrow">在线对局</span>
         <h2>邀请朋友加入 3D 棋局</h2>
-        <p>创建房间后分享链接；第三位及之后加入的玩家会成为旁观者。</p>
+        <p>创建房间后分享链接；也可以明确选择“仅观战”，不会占用黑白座位。</p>
 
         <label class="dialog-field" for="player-name">
           <span>你的名字</span>
@@ -444,7 +558,10 @@
         </label>
 
         <button id="join-room" class="secondary-button dialog-wide-button" type="button">
-          加入房间
+          加入对局
+        </button>
+        <button id="watch-room" class="secondary-button dialog-wide-button spectator-button" type="button">
+          仅观战
         </button>
 
         <p id="online-error" class="dialog-error" role="alert" hidden></p>
@@ -457,8 +574,16 @@
     <dialog id="ai-dialog" class="game-dialog ai-dialog">
       <form id="ai-form">
         <span class="eyebrow">本机 AI 对手</span>
-        <h2>和 KataGo 下一盘</h2>
+        <h2>让人类或 KataGo 下一盘</h2>
         <p>模型会在浏览器后台观察全盘，再按当前棋盘的接缝规则搜索落点。无需账号或第三方 API，服务器不承担推理。</p>
+
+        <label class="dialog-field" for="ai-match-mode">
+          <span>对局方式</span>
+          <select id="ai-match-mode">
+            <option value="human-ai">你和 AI 对弈</option>
+            <option value="ai-ai">AI 和 AI 自动对弈</option>
+          </select>
+        </label>
 
         <label class="dialog-field" for="ai-model">
           <span>AI 模型</span>
@@ -474,7 +599,7 @@
           <span id="ai-model-warning-strength"></span>
         </div>
 
-        <label class="dialog-field" for="ai-human-color">
+        <label id="ai-human-color-field" class="dialog-field" for="ai-human-color">
           <span>你执哪一方</span>
           <select id="ai-human-color">
             <option value="black">黑方 · 你先行</option>

@@ -1,6 +1,7 @@
 import {
   BLACK,
   GoEngine,
+  PHASE_FINISHED,
   REPLAY_VERSION,
   WHITE,
 } from "./goEngine.js";
@@ -79,6 +80,37 @@ function createReplayGame(replay) {
   return GoEngine.fromState(replay.base);
 }
 
+function timeoutReplayResult(replay) {
+  const outcome = replay?.outcome;
+  if (outcome === undefined || outcome === null) return null;
+  requireReplayObject(outcome, "replay.outcome");
+  if (
+    outcome.reason !== "timeout" ||
+    !VALID_COLORS.has(outcome.winner) ||
+    !VALID_COLORS.has(outcome.loser) ||
+    outcome.winner === outcome.loser ||
+    !Number.isFinite(outcome.finishedAt)
+  ) {
+    throw new TypeError("replay.outcome must be a valid timeout result");
+  }
+  return {
+    winner: outcome.winner,
+    loser: outcome.loser,
+    margin: 0,
+    reason: "timeout",
+    finishedAt: outcome.finishedAt,
+  };
+}
+
+function finishReplayFrameByTimeout(frame, result) {
+  if (!result) return frame;
+  return {
+    ...frame,
+    phase: PHASE_FINISHED,
+    result: structuredClone(result),
+  };
+}
+
 /**
  * Expand a compact replay into render-ready positions.
  *
@@ -92,6 +124,7 @@ export function buildReplayFrames(replay) {
   const game = createReplayGame(replay);
   const frames = [game.getState()];
   const steps = [];
+  const timeoutResult = timeoutReplayResult(replay);
 
   replay.events.forEach((event, eventIndex) => {
     const result = applyReplayEvent(game, event, eventIndex);
@@ -113,6 +146,13 @@ export function buildReplayFrames(replay) {
       steps.push({ type: "pass", color: result.color });
     }
   });
+
+  if (timeoutResult) {
+    frames[frames.length - 1] = finishReplayFrameByTimeout(
+      frames[frames.length - 1],
+      timeoutResult,
+    );
+  }
 
   return { frames, steps, complete: replay.complete };
 }

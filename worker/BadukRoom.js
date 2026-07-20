@@ -85,6 +85,10 @@ export class BadukRoom {
         await this.retireRoom();
         return;
       }
+      if (advanced.changed) {
+        await this.persist();
+        this.broadcastState();
+      }
       await this.scheduleAlarm();
     });
   }
@@ -208,6 +212,10 @@ export class BadukRoom {
       if (result.expired) {
         await this.retireRoom();
         return;
+      }
+      if (result.changed) {
+        await this.persist();
+        this.broadcastState();
       }
       await this.scheduleAlarm();
     });
@@ -351,7 +359,26 @@ export class BadukRoom {
       this.sendReceipt(socket, decision.receipt);
       return;
     }
+    try {
+      // The reconnect handshake and duplicate receipt path stay free. Every
+      // new or stale spectator command that can trigger a snapshot or storage
+      // write shares bounded member + room budgets.
+      this.engine.enforceSpectatorCommandRateLimit({
+        playerId,
+        action: command.action,
+      });
+    } catch (error) {
+      this.sendNormalizedError(socket, error, command.id);
+      return;
+    }
     if (decision.kind === "stale") {
+      // Spectators are charged before this branch so repeated stale commands
+      // cannot bypass the normal sync budget. Persist that token spend before
+      // replying; otherwise a Durable Object hibernation could restore the
+      // previous full bucket and make the limit effectively memory-only.
+      if (attachment.identity.role === "spectator") {
+        await this.persist();
+      }
       this.sendError(socket, {
         id: command.id,
         code: "STALE_COMMAND",
@@ -404,6 +431,7 @@ export class BadukRoom {
         const shouldPersistRejection =
           command.action !== "leave" &&
           normalized.code !== "CHAT_RATE_LIMITED" &&
+          normalized.code !== "SPECTATOR_RATE_LIMITED" &&
           this.engine.member(playerId);
         if (shouldPersistRejection) {
           this.engine.recordCommand({
@@ -418,6 +446,10 @@ export class BadukRoom {
         console.error("Unable to persist rejected command", receiptError);
       }
       this.sendError(socket, { id: command.id, ...normalized });
+      if (normalized.code === "GAME_TIMED_OUT") {
+        this.broadcastState();
+        await this.scheduleAlarm();
+      }
     }
   }
 

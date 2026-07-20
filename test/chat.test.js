@@ -29,6 +29,28 @@ test("Go coordinates skip I and round-trip on supported board sizes", () => {
   }
 });
 
+test("rectangular coordinates use width for letters and height for numbers", () => {
+  assert.equal(formatBoardCoordinate(8, 12, 9, 13), "N1");
+  assert.equal(formatBoardCoordinate(0, 12, { width: 13, height: 9 }), "N9");
+  assert.deepEqual(parseBoardCoordinate("N1", 9, 13), {
+    row: 8,
+    col: 12,
+    label: "N1",
+  });
+  assert.equal(parseBoardCoordinate("T1", 9, 13), null);
+  const normalized = normalizeChatPayload(
+    { kind: "text", text: "看 N1 和 D9" },
+    { width: 13, height: 9, topology: "cylinder" },
+  );
+  assert.equal(normalized.boardWidth, 13);
+  assert.equal(normalized.boardHeight, 9);
+  assert.equal("boardSize" in normalized, false);
+  assert.deepEqual(normalized.points, [
+    { row: 8, col: 12, label: "N1" },
+    { row: 0, col: 3, label: "D9" },
+  ]);
+});
+
 test("text chat remains uncensored while legal coordinates become references", () => {
   const text = "你好 <script>alert('x')</script> 👨‍👩‍👧‍👦，看看 d4 和 T19";
   const normalized = normalizeChatPayload(

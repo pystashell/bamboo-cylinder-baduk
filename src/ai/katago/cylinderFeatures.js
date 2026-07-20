@@ -8,8 +8,8 @@ import {
 export const KATAGO_SPATIAL_CHANNELS = 22;
 export const KATAGO_GLOBAL_CHANNELS = 19;
 
-function featureIndex(size, row, col, channel) {
-  return (row * size + col) * KATAGO_SPATIAL_CHANNELS + channel;
+function featureIndex(width, row, col, channel) {
+  return (row * width + col) * KATAGO_SPATIAL_CHANNELS + channel;
 }
 
 function pointKey(row, col) {
@@ -30,24 +30,24 @@ export function buildCylinderFeatures(gameOrState) {
     gameOrState instanceof GoEngine
       ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
-  const { size } = game;
+  const { width, height } = game;
   const spatial = new Float32Array(
-    size * size * KATAGO_SPATIAL_CHANNELS,
+    width * height * KATAGO_SPATIAL_CHANNELS,
   );
   const global = new Float32Array(KATAGO_GLOBAL_CHANNELS);
   const player = game.currentPlayer;
   const opponent = player === BLACK ? WHITE : BLACK;
 
-  for (let row = 0; row < size; row += 1) {
-    for (let col = 0; col < size; col += 1) {
-      spatial[featureIndex(size, row, col, 0)] = 1;
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      spatial[featureIndex(width, row, col, 0)] = 1;
     }
   }
 
-  const liberties = new Uint8Array(size * size);
+  const liberties = new Uint8Array(width * height);
   const visited = new Set();
-  for (let row = 0; row < size; row += 1) {
-    for (let col = 0; col < size; col += 1) {
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
       if (game.get(row, col) === null || visited.has(pointKey(row, col))) {
         continue;
       }
@@ -55,19 +55,19 @@ export function buildCylinderFeatures(gameOrState) {
       const count = Math.min(4, group.liberties.length);
       for (const stone of group.stones) {
         visited.add(pointKey(stone.row, stone.col));
-        liberties[stone.row * size + stone.col] = count;
+        liberties[stone.row * width + stone.col] = count;
       }
     }
   }
 
-  for (let row = 0; row < size; row += 1) {
-    for (let col = 0; col < size; col += 1) {
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
       const color = game.get(row, col);
       if (color === null) continue;
-      spatial[featureIndex(size, row, col, color === player ? 1 : 2)] = 1;
-      const count = liberties[row * size + col];
+      spatial[featureIndex(width, row, col, color === player ? 1 : 2)] = 1;
+      const count = liberties[row * width + col];
       if (count >= 1 && count <= 3) {
-        spatial[featureIndex(size, row, col, count + 2)] = 1;
+        spatial[featureIndex(width, row, col, count + 2)] = 1;
       }
     }
   }
@@ -77,7 +77,7 @@ export function buildCylinderFeatures(gameOrState) {
   // recent ordinary move is still useful as the first history plane.
   if (game.lastMove?.type === "play" && game.lastMove.color === opponent) {
     spatial[
-      featureIndex(size, game.lastMove.row, game.lastMove.col, 9)
+      featureIndex(width, game.lastMove.row, game.lastMove.col, 9)
     ] = 1;
   } else if (game.lastMove?.type === "pass") {
     global[0] = 1;
@@ -93,7 +93,7 @@ export function buildCylinderFeatures(gameOrState) {
   if (game.scoringRule !== SCORING_CHINESE) {
     global[9] = 1; // territory scoring
   } else {
-    const drawableKomisAreEven = (size * size) % 2 === 0;
+    const drawableKomisAreEven = (width * height) % 2 === 0;
     const komiFloor = drawableKomisAreEven
       ? Math.floor(selfKomi / 2) * 2
       : Math.floor((selfKomi - 1) / 2) * 2 + 1;
@@ -103,7 +103,13 @@ export function buildCylinderFeatures(gameOrState) {
   }
   global[14] = game.consecutivePasses === 1 ? 1 : 0;
 
-  return { size, spatial, global };
+  return {
+    ...(game.size === undefined ? {} : { size: game.size }),
+    width,
+    height,
+    spatial,
+    global,
+  };
 }
 
 /**
@@ -120,14 +126,14 @@ export function buildLegalPolicyMask(gameOrState) {
       ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
   const state = game.exportState({ includeReplay: false });
-  const pointCount = game.size * game.size;
+  const pointCount = game.width * game.height;
   const mask = new Uint8Array(pointCount + 1);
 
-  for (let row = 0; row < game.size; row += 1) {
-    for (let col = 0; col < game.size; col += 1) {
+  for (let row = 0; row < game.height; row += 1) {
+    for (let col = 0; col < game.width; col += 1) {
       if (game.get(row, col) !== null) continue;
       const trial = GoEngine.fromState(state);
-      if (trial.play(row, col).ok) mask[row * game.size + col] = 1;
+      if (trial.play(row, col).ok) mask[row * game.width + col] = 1;
     }
   }
 
@@ -153,8 +159,8 @@ export function policyPriorsFromLogits({
     gameOrState instanceof GoEngine
       ? GoEngine.fromState(gameOrState.exportState({ includeReplay: false }))
       : GoEngine.fromState(gameOrState);
-  const { size } = game;
-  const pointCount = size * size;
+  const { width, height } = game;
+  const pointCount = width * height;
   if (!Number.isInteger(policyChannels) || policyChannels < 1) {
     throw new RangeError("policyChannels must be a positive integer");
   }

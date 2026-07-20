@@ -1,6 +1,7 @@
 import {
   BLACK,
   GoEngine,
+  PHASE_FINISHED,
   PHASE_PLAY,
   PHASE_SCORING,
   TOPOLOGY_CYLINDER,
@@ -8,6 +9,18 @@ import {
   TOPOLOGY_TORUS,
   WHITE,
 } from "../game/goEngine.js";
+import {
+  advanceTimeControl,
+  completeTimeControlTurn,
+  createTimeControl,
+  nextTimeControlDueAt,
+  normalizeTimeControlConfig,
+  pauseTimeControl,
+  restoreTimeControl,
+  snapshotTimeControl,
+  startTimeControl,
+  timeControlConfig,
+} from "../game/timeControl.js";
 import {
   ChatValidationError,
   normalizeChatPayload,
@@ -17,6 +30,12 @@ import { isRoomCode, isRoomRole } from "./protocol.js";
 
 export const ROOM_TTL_MS = 24 * 60 * 60 * 1_000;
 export const MAX_SPECTATORS = 32;
+export const SPECTATOR_RESERVATION_TTL_MS = 60 * 1_000;
+export const SPECTATOR_RECONNECT_GRACE_MS = 5 * 60 * 1_000;
+export const SPECTATOR_COMMAND_MEMBER_BURST = 3;
+export const SPECTATOR_COMMAND_MEMBER_REFILL_MS = 3 * 1_000;
+export const SPECTATOR_COMMAND_ROOM_BURST = 8;
+export const SPECTATOR_COMMAND_ROOM_REFILL_MS = 1 * 1_000;
 export const MAX_COMMAND_RECEIPTS = 256;
 export const CHAT_MEMBER_BURST = 5;
 export const CHAT_MEMBER_REFILL_MS = 1_200;
@@ -42,6 +61,39 @@ const GAME_ERROR_MESSAGES = Object.freeze({
   game_not_scoring: "当前还没有进入点目阶段。",
   empty_point: "空点不能标记为死子。",
 });
+
+function timeControlError(error, persisted = false) {
+  if (error instanceof RoomEngineError) return error;
+  return new RoomEngineError(
+    persisted ? "持久化计时状态无效。" : "计时设置无效。",
+    persisted ? 500 : 400,
+    persisted ? "BAD_ROOM_STATE" : "BAD_REQUEST",
+  );
+}
+
+function roomTimeControlConfig(value) {
+  try {
+    return normalizeTimeControlConfig(value);
+  } catch (error) {
+    throw timeControlError(error);
+  }
+}
+
+function freshRoomTimeControl(value, now) {
+  try {
+    return createTimeControl(value, { now });
+  } catch (error) {
+    throw timeControlError(error);
+  }
+}
+
+function persistedRoomTimeControl(value) {
+  try {
+    return restoreTimeControl(value);
+  } catch (error) {
+    throw timeControlError(error, true);
+  }
+}
 
 export class RoomEngineError extends Error {
   constructor(message, status = 400, code = "BAD_REQUEST", retryable = false) {
@@ -94,16 +146,16 @@ function normalizeTokenHash(value) {
   return value.toLowerCase();
 }
 
-function normalizeSize(value) {
-  const size = value ?? 19;
-  if (!Number.isInteger(size) || size < 3 || size > 25) {
+function normalizeDimension(value, label = "棋盘大小") {
+  const dimension = value ?? 19;
+  if (!Number.isInteger(dimension) || dimension < 3 || dimension > 25) {
     throw new RoomEngineError(
-      "棋盘大小必须是 3 到 25 之间的整数。",
+      `${label}必须是 3 到 25 之间的整数。`,
       400,
       "BAD_REQUEST",
     );
   }
-  return size;
+  return dimension;
 }
 
 function normalizeKomi(value) {
@@ -215,7 +267,9 @@ function restoreGame(value) {
   }
 
   const game = new GoEngine({
-    size: snapshot.size,
+    ...(Number.isInteger(snapshot.size) ? { size: snapshot.size } : {}),
+    width: snapshot.width ?? snapshot.size,
+    height: snapshot.height ?? snapshot.size,
     komi: snapshot.komi,
     scoringRule: snapshot.scoringRule,
     initialBoard: snapshot.board,
@@ -384,7 +438,12 @@ export class RoomEngine {
   static create({
     code,
     name,
-    size = 19,
+    size,
+    width,
+    height,
+    mainTimeSeconds,
+    byoYomiPeriods,
+    byoYomiSeconds,
     komi = 6.5,
     scoringRule = "japanese",
     topology = TOPOLOGY_CYLINDER,
@@ -399,8 +458,20 @@ export class RoomEngine {
     const normalizedName = normalizeName(name);
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedTokenHash = normalizeTokenHash(tokenHash);
+    const normalizedWidth = normalizeDimension(width ?? size ?? height ?? 19, "棋盘宽度");
+    const normalizedHeight = normalizeDimension(height ?? size ?? width ?? 19, "棋盘高度");
+    const timeControl = freshRoomTimeControl(
+      roomTimeControlConfig({
+        mainTimeSeconds,
+        byoYomiPeriods,
+        byoYomiSeconds,
+      }),
+      now,
+    );
     const game = new GoEngine({
-      size: normalizeSize(size),
+      ...(normalizedWidth === normalizedHeight ? { size: normalizedWidth } : {}),
+      width: normalizedWidth,
+      height: normalizedHeight,
       komi: normalizeKomi(komi),
       scoringRule: normalizeScoringRule(scoringRule),
       topology: normalizeTopology(topology),
@@ -412,9 +483,14 @@ export class RoomEngine {
       moveCount: 0,
       scoreConfirmations: [],
       undoRequest: null,
+      timeControl,
       chatSequence: 0,
       chatMessages: [],
       chatBucket: freshChatBucket(CHAT_ROOM_BURST, now),
+      spectatorCommandBucket: freshChatBucket(
+        SPECTATOR_COMMAND_ROOM_BURST,
+        now,
+      ),
       game: serializeGame(game),
       members: [
         {
@@ -453,6 +529,7 @@ export class RoomEngine {
     state.moveCount ??= 0;
     state.scoreConfirmations ??= [];
     state.undoRequest ??= null;
+    state.timeControl = persistedRoomTimeControl(state.timeControl);
     state.chatMessages = trimStoredChatHistory(state.chatMessages);
     const latestChatSequence = state.chatMessages.reduce(
       (latest, message) => Math.max(latest, message.sequence),
@@ -464,6 +541,11 @@ export class RoomEngine {
     state.chatBucket = restoredChatBucket(
       state.chatBucket,
       CHAT_ROOM_BURST,
+      state.updatedAt,
+    );
+    state.spectatorCommandBucket = restoredChatBucket(
+      state.spectatorCommandBucket,
+      SPECTATOR_COMMAND_ROOM_BURST,
       state.updatedAt,
     );
     if (
@@ -484,8 +566,29 @@ export class RoomEngine {
         CHAT_MEMBER_BURST,
         state.updatedAt,
       );
+      if (member.role === "spectator") {
+        // Legacy spectators predate the reservation marker. Treat them as a
+        // previously connected observer so an upgrade keeps the longer,
+        // reconnect-friendly grace period instead of ejecting them at once.
+        if (!Object.prototype.hasOwnProperty.call(member, "lastConnectedAt")) {
+          member.lastConnectedAt = member.lastSeenAt ?? member.joinedAt;
+        }
+        if (
+          member.lastConnectedAt !== null &&
+          !Number.isFinite(member.lastConnectedAt)
+        ) {
+          member.lastConnectedAt = member.lastSeenAt ?? member.joinedAt;
+        }
+        member.spectatorCommandBucket = restoredChatBucket(
+          member.spectatorCommandBucket,
+          SPECTATOR_COMMAND_MEMBER_BURST,
+          member.lastSeenAt ?? state.updatedAt,
+        );
+      }
     }
-    return new RoomEngine(state, restoreGame(state.game));
+    const room = new RoomEngine(state, restoreGame(state.game));
+    room.assertTimeControlConsistency();
+    return room;
   }
 
   serialize() {
@@ -523,18 +626,34 @@ export class RoomEngine {
         online: this.isOnline(member.playerId),
         lastSeenAt: member.lastSeenAt,
       }));
+    const timeControl = snapshotTimeControl(this.state.timeControl, now);
     const game = clone(this.game.getState());
+    if (timeControl?.outcome) {
+      game.phase = PHASE_FINISHED;
+      game.result = {
+        winner: timeControl.outcome.winner,
+        loser: timeControl.outcome.loser,
+        margin: 0,
+        reason: "timeout",
+        finishedAt: timeControl.outcome.finishedAt,
+      };
+    }
     game.moveCount = this.state.moveCount;
+    const replay = snapshotReplay(this.game);
+    if (timeControl?.outcome) replay.outcome = clone(timeControl.outcome);
     return {
       code: this.state.code,
       revision: this.state.revision,
       version: this.state.revision,
       moveCount: this.state.moveCount,
-      replay: snapshotReplay(this.game),
+      replay,
       undoAvailable:
-        typeof this.game.canUndo === "function" && this.game.canUndo(),
+        !timeControl?.outcome &&
+        typeof this.game.canUndo === "function" &&
+        this.game.canUndo(),
       scoreConfirmations: clone(this.state.scoreConfirmations),
       undoRequest: clone(this.state.undoRequest),
+      timeControl,
       chat: {
         sequence: this.state.chatSequence,
         messages: clone(this.state.chatMessages),
@@ -604,6 +723,12 @@ export class RoomEngine {
       }
     }
     if (effectiveRole === "spectator" && this.spectatorCount() >= MAX_SPECTATORS) {
+      // HTTP join reserves an identity before its WebSocket is established.
+      // Reclaim abandoned reservations (and observers past their reconnect
+      // grace) on demand so 32 never-connected requests cannot lock a room.
+      this.evictExpiredSpectators(now);
+    }
+    if (effectiveRole === "spectator" && this.spectatorCount() >= MAX_SPECTATORS) {
       throw new RoomEngineError(
         "旁观席已经满了。",
         409,
@@ -619,10 +744,20 @@ export class RoomEngine {
       color,
       joinedAt: now,
       lastSeenAt: now,
+      ...(effectiveRole === "spectator"
+        ? {
+            lastConnectedAt: null,
+            spectatorCommandBucket: freshChatBucket(
+              SPECTATOR_COMMAND_MEMBER_BURST,
+              now,
+            ),
+          }
+        : {}),
       lastSequence: 0,
       chatBucket: freshChatBucket(CHAT_MEMBER_BURST, now),
     };
     this.state.members.push(member);
+    this.syncTimeControlRunning(now);
     this.commit(now);
     return {
       changed: true,
@@ -673,6 +808,8 @@ export class RoomEngine {
       connectionId ?? crypto.randomUUID(),
     );
     this.connections.set(normalizedConnectionId, identity.playerId);
+    const member = this.requireMember(identity.playerId);
+    if (member.role === "spectator") member.lastConnectedAt = now;
     return {
       identity,
       connectionId: normalizedConnectionId,
@@ -683,16 +820,34 @@ export class RoomEngine {
 
   resumeConnection(playerId, connectionId, nowInput) {
     const now = readNow(nowInput);
-    this.prepare(now);
+    // Durable Object hibernation restores sockets before rebuilding this
+    // in-memory connection map. Do not run spectator eviction until those
+    // known-live sockets have been reattached; the constructor advances the
+    // room immediately after the restore loop.
+    this.assertAvailable(now);
     const member = this.requireMember(normalizePlayerId(playerId));
     const normalizedConnectionId = normalizePlayerId(connectionId);
     this.connections.set(normalizedConnectionId, member.playerId);
+    if (member.role === "spectator") {
+      member.lastConnectedAt = now;
+      member.lastSeenAt = now;
+    }
     return this.identityFor(member);
   }
 
   disconnect({ connectionId, now: nowInput }) {
     const now = readNow(nowInput);
+    const playerId = this.connections.get(connectionId);
     this.connections.delete(connectionId);
+    const member = playerId ? this.member(playerId) : null;
+    if (
+      member?.role === "spectator" &&
+      !this.isOnline(member.playerId)
+    ) {
+      // Start the reconnect grace from the actual disconnect, rather than the
+      // last command the observer happened to send while watching.
+      member.lastSeenAt = now;
+    }
     return {
       changed: false,
       revision: this.state.revision,
@@ -725,6 +880,7 @@ export class RoomEngine {
     this.state.receipts = this.state.receipts.filter(
       (receipt) => receipt.playerId !== member.playerId,
     );
+    this.syncTimeControlRunning(now);
     this.commit(now);
     return {
       changed: true,
@@ -801,7 +957,9 @@ export class RoomEngine {
     let normalized;
     try {
       normalized = normalizeChatPayload(payload, {
-        size: this.game.size,
+        width: this.game.width,
+        height: this.game.height,
+        ...(this.game.size === undefined ? {} : { size: this.game.size }),
         topology: this.game.topology,
       });
     } catch (error) {
@@ -824,7 +982,11 @@ export class RoomEngine {
         ? { text: normalized.text }
         : { stickerId: normalized.stickerId }),
       points: clone(normalized.points),
-      boardSize: normalized.boardSize,
+      boardWidth: normalized.boardWidth,
+      boardHeight: normalized.boardHeight,
+      ...(normalized.boardSize === undefined
+        ? {}
+        : { boardSize: normalized.boardSize }),
       boardTopology: normalized.boardTopology,
       moveCount: this.state.moveCount,
       sentAt: now,
@@ -860,6 +1022,15 @@ export class RoomEngine {
     if (action === "leave") return this.leave({ playerId, now });
 
     this.requirePlayer(member);
+    if (this.state.timeControl?.outcome && action !== "new_game") {
+      const { loser, winner } = this.state.timeControl.outcome;
+      throw new RoomEngineError(
+        `${loser === BLACK ? "黑方" : "白方"}已经超时，${winner === BLACK ? "黑方" : "白方"}获胜。`,
+        409,
+        "GAME_TIMED_OUT",
+      );
+    }
+    this.syncTimeControlRunning(now);
     let move;
 
     if (action === "play") {
@@ -1049,8 +1220,27 @@ export class RoomEngine {
           "FORBIDDEN",
         );
       }
-      this.game = new GoEngine({
-        size: normalizeSize(payload.size ?? this.game.size),
+      const requestedWidth = normalizeDimension(
+        payload.width ?? payload.size ?? this.game.width,
+        "棋盘宽度",
+      );
+      const requestedHeight = normalizeDimension(
+        payload.height ?? payload.size ?? this.game.height,
+        "棋盘高度",
+      );
+      const previousTimeControl = timeControlConfig(this.state.timeControl);
+      const requestedTimeControl = roomTimeControlConfig({
+        mainTimeSeconds:
+          payload.mainTimeSeconds ?? previousTimeControl?.mainTimeSeconds ?? 0,
+        byoYomiPeriods:
+          payload.byoYomiPeriods ?? previousTimeControl?.byoYomiPeriods ?? 0,
+        byoYomiSeconds:
+          payload.byoYomiSeconds ?? previousTimeControl?.byoYomiSeconds ?? 0,
+      });
+      const newGame = new GoEngine({
+        ...(requestedWidth === requestedHeight ? { size: requestedWidth } : {}),
+        width: requestedWidth,
+        height: requestedHeight,
         komi: normalizeKomi(payload.komi ?? this.game.komi),
         scoringRule: normalizeScoringRule(
           payload.scoringRule ?? this.game.scoringRule,
@@ -1059,6 +1249,8 @@ export class RoomEngine {
           payload.topology ?? this.game.topology ?? TOPOLOGY_CYLINDER,
         ),
       });
+      this.game = newGame;
+      this.state.timeControl = freshRoomTimeControl(requestedTimeControl, now);
       this.state.moveCount = 0;
       this.state.undoRequest = null;
       move = { ok: true, type: "new_game", phase: PHASE_PLAY };
@@ -1074,6 +1266,8 @@ export class RoomEngine {
         "ILLEGAL_MOVE",
       );
     }
+
+    this.updateTimeControlAfterAction(action, now);
 
     if (
       action === "play" ||
@@ -1124,6 +1318,47 @@ export class RoomEngine {
     return { kind: "new", previousSequence: member.lastSequence };
   }
 
+  enforceSpectatorCommandRateLimit({ playerId, action, now: nowInput }) {
+    const now = readNow(nowInput);
+    const member = this.requireMember(normalizePlayerId(playerId));
+    if (member.role !== "spectator" || action === "leave") return;
+
+    const memberSpend = spendChatToken(
+      restoredChatBucket(
+        member.spectatorCommandBucket,
+        SPECTATOR_COMMAND_MEMBER_BURST,
+        member.lastSeenAt ?? now,
+      ),
+      SPECTATOR_COMMAND_MEMBER_BURST,
+      SPECTATOR_COMMAND_MEMBER_REFILL_MS,
+      now,
+    );
+    const roomSpend = spendChatToken(
+      restoredChatBucket(
+        this.state.spectatorCommandBucket,
+        SPECTATOR_COMMAND_ROOM_BURST,
+        this.state.updatedAt,
+      ),
+      SPECTATOR_COMMAND_ROOM_BURST,
+      SPECTATOR_COMMAND_ROOM_REFILL_MS,
+      now,
+    );
+    if (!memberSpend.ok || !roomSpend.ok) {
+      throw new RoomEngineError(
+        "观战同步请求过于频繁，请稍后再试。",
+        429,
+        "SPECTATOR_RATE_LIMITED",
+        true,
+      );
+    }
+
+    // Commit both buckets together only after both checks pass. Rejected
+    // requests therefore need no storage write and cannot consume a partial
+    // room/member budget.
+    member.spectatorCommandBucket = memberSpend.bucket;
+    this.state.spectatorCommandBucket = roomSpend.bucket;
+  }
+
   recordCommand({ playerId, id, sequence = null, now: nowInput, error }) {
     const now = readNow(nowInput);
     const decision = this.inspectCommand(playerId, id, sequence);
@@ -1170,17 +1405,62 @@ export class RoomEngine {
         nextDueAt: null,
       };
     }
+    const evictedSpectators = this.evictExpiredSpectators(now);
+    const advancedClock = advanceTimeControl(this.state.timeControl, now);
+    if (
+      advancedClock?.outcome &&
+      !this.state.timeControl?.outcome
+    ) {
+      this.state.timeControl = advancedClock;
+      this.state.undoRequest = null;
+      this.state.scoreConfirmations = [];
+      this.commit(now);
+      return {
+        changed: true,
+        expired: false,
+        timedOut: true,
+        revision: this.state.revision,
+        room: this.snapshot(now),
+        nextDueAt: this.nextDueAt(),
+      };
+    }
+    if (evictedSpectators > 0) {
+      // Membership maintenance gets a revision so clients can order the new
+      // presence snapshot, but it is not user activity and must not prolong
+      // the room's 24-hour TTL.
+      this.state.revision += 1;
+      this.state.updatedAt = now;
+      return {
+        changed: true,
+        expired: false,
+        evictedSpectators,
+        revision: this.state.revision,
+        room: this.snapshot(now),
+        nextDueAt: this.nextDueAt(),
+      };
+    }
     return {
       changed: false,
       expired: false,
       revision: this.state.revision,
       room: this.snapshot(now),
-      nextDueAt: this.state.expiresAt,
+      nextDueAt: this.nextDueAt(),
     };
   }
 
+  timeControlDueAt() {
+    return nextTimeControlDueAt(this.state.timeControl);
+  }
+
   nextDueAt() {
-    return this.state.expiredAt === null ? this.state.expiresAt : null;
+    if (this.state.expiredAt !== null) return null;
+    const clockDueAt = this.timeControlDueAt();
+    const spectatorDueAt = this.nextSpectatorCleanupDueAt();
+    return Math.min(
+      this.state.expiresAt,
+      clockDueAt ?? Number.POSITIVE_INFINITY,
+      spectatorDueAt ?? Number.POSITIVE_INFINITY,
+    );
   }
 
   member(playerId) {
@@ -1222,6 +1502,81 @@ export class RoomEngine {
         "请等待黑白双方都加入房间后再开始对局。",
         409,
         "WAITING_FOR_OPPONENT",
+      );
+    }
+  }
+
+  hasBothPlayers() {
+    const colors = new Set(
+      this.state.members
+        .filter((member) => member.role === "player")
+        .map((member) => member.color),
+    );
+    return colors.has(BLACK) && colors.has(WHITE);
+  }
+
+  shouldTimeControlRun() {
+    return Boolean(
+      this.state.timeControl &&
+      !this.state.timeControl.outcome &&
+      this.game.phase === PHASE_PLAY &&
+      this.hasBothPlayers() &&
+      !this.state.undoRequest,
+    );
+  }
+
+  syncTimeControlRunning(now) {
+    const clock = this.state.timeControl;
+    if (!clock || clock.outcome) return;
+    if (!this.shouldTimeControlRun()) {
+      if (clock.activeColor !== null) {
+        this.state.timeControl = pauseTimeControl(clock, now);
+      }
+      return;
+    }
+    if (clock.activeColor === null) {
+      this.state.timeControl = startTimeControl(clock, this.game.currentPlayer, now);
+      return;
+    }
+    if (clock.activeColor !== this.game.currentPlayer) {
+      throw new RoomEngineError(
+        "计时方与当前行棋方不一致。",
+        500,
+        "BAD_ROOM_STATE",
+      );
+    }
+  }
+
+  updateTimeControlAfterAction(action, now) {
+    if (!this.state.timeControl) return;
+    if (action === "play" || action === "pass") {
+      const nextColor = this.shouldTimeControlRun()
+        ? this.game.currentPlayer
+        : null;
+      this.state.timeControl = completeTimeControlTurn(
+        this.state.timeControl,
+        now,
+        nextColor,
+      );
+      return;
+    }
+    this.syncTimeControlRunning(now);
+  }
+
+  assertTimeControlConsistency() {
+    const clock = this.state.timeControl;
+    if (!clock) return;
+    const shouldRun = this.shouldTimeControlRun();
+    const invalidOutcome = clock.outcome && this.game.phase !== PHASE_PLAY;
+    const invalidActive =
+      (clock.activeColor !== null &&
+        (!shouldRun || clock.activeColor !== this.game.currentPlayer)) ||
+      (clock.activeColor === null && shouldRun);
+    if (invalidOutcome || invalidActive) {
+      throw new RoomEngineError(
+        "持久化计时状态与棋局不一致。",
+        500,
+        "BAD_ROOM_STATE",
       );
     }
   }
@@ -1285,6 +1640,49 @@ export class RoomEngine {
   spectatorCount() {
     return this.state.members.filter((member) => member.role === "spectator")
       .length;
+  }
+
+  spectatorExpiryAt(member) {
+    if (member.role !== "spectator" || this.isOnline(member.playerId)) return null;
+    if (Number.isFinite(member.lastConnectedAt)) {
+      return (member.lastSeenAt ?? member.lastConnectedAt) +
+        SPECTATOR_RECONNECT_GRACE_MS;
+    }
+    return member.joinedAt + SPECTATOR_RESERVATION_TTL_MS;
+  }
+
+  nextSpectatorCleanupDueAt() {
+    let dueAt = null;
+    for (const member of this.state.members) {
+      const candidate = this.spectatorExpiryAt(member);
+      if (candidate !== null && (dueAt === null || candidate < dueAt)) {
+        dueAt = candidate;
+      }
+    }
+    return dueAt;
+  }
+
+  evictExpiredSpectators(now) {
+    const evictedIds = new Set(
+      this.state.members
+        .filter((member) => {
+          const expiresAt = this.spectatorExpiryAt(member);
+          return expiresAt !== null && now >= expiresAt;
+        })
+        .map((member) => member.playerId),
+    );
+    if (evictedIds.size === 0) return 0;
+
+    this.state.members = this.state.members.filter(
+      (member) => !evictedIds.has(member.playerId),
+    );
+    this.state.receipts = this.state.receipts.filter(
+      (receipt) => !evictedIds.has(receipt.playerId),
+    );
+    for (const [connectionId, playerId] of this.connections) {
+      if (evictedIds.has(playerId)) this.connections.delete(connectionId);
+    }
+    return evictedIds.size;
   }
 
   isOnline(playerId) {
