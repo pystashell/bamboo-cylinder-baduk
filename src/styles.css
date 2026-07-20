@@ -228,7 +228,7 @@ summary:focus-visible {
   top: 18px;
   right: 18px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -236,7 +236,12 @@ summary:focus-visible {
   backdrop-filter: blur(12px);
 }
 
+.view-switch::before {
+  display: none;
+}
+
 .view-switch button {
+  grid-column: span 2;
   min-height: 34px;
   padding: 7px 11px;
   border: 0;
@@ -244,6 +249,37 @@ summary:focus-visible {
   color: var(--muted);
   background: transparent;
   font-size: 11px;
+}
+
+.board-stage:not([data-topology="cylinder"]) .view-switch::before {
+  display: block;
+  grid-row: 1;
+  grid-column: 1 / span 2;
+  min-height: 34px;
+  padding: 7px 16px 7px 11px;
+  visibility: hidden;
+  content: "";
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.board-stage[data-topology="torus"] .view-switch::before {
+  content: "◉ 立体甜甜圈";
+}
+
+.board-stage[data-topology="mobius"] .view-switch::before {
+  content: "◉ 立体莫比乌斯";
+}
+
+.board-stage:not([data-topology="cylinder"]) .view-switch button[data-view-mode="flat"] {
+  grid-row: 1;
+  grid-column: 1 / span 3;
+}
+
+.board-stage:not([data-topology="cylinder"]) .view-switch button[data-view-mode="3d"] {
+  grid-row: 1;
+  grid-column: 4 / span 3;
 }
 
 .view-switch button:hover {
@@ -2017,6 +2053,12 @@ select:disabled {
     padding: 6px 7px;
     font-size: 10px;
     white-space: nowrap;
+  }
+
+  .board-stage:not([data-topology="cylinder"]) .view-switch::before {
+    min-height: 32px;
+    padding: 6px 10px 6px 7px;
+    font-size: 10px;
   }
 
   .view-switch button span {
