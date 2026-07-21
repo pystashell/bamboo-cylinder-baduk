@@ -209,17 +209,15 @@ test("lobby lifecycle and rectangular preview copy is available in English", () 
     "Black wins · White timed out.",
   );
   assert.equal(
-    translateText("本局已结束；黑方可在当前房间设置下一局，成员和聊天记录都会保留。"),
-    "This game is over. Black can configure the next game in this room; members and chat history will be kept.",
+    translateText("本局已结束；黑方可直接开始下一局，或在当前房间调整设置；成员和聊天记录都会保留。"),
+    "This game is over. Black can immediately start the next game or adjust its settings in this room; members and chat history will be kept.",
   );
   assert.equal(
     translateText("系统已保守预标较明确的死棋；点击棋子可修改整块棋的死活判断。"),
     "Clearly dead groups are pre-marked conservatively. Select a stone to revise its entire group's status.",
   );
-  assert.equal(
-    translateText("在当前房间设置下一局"),
-    "Configure next game in this room",
-  );
+  assert.equal(translateText("直接进行下一局"), "Start next game now");
+  assert.equal(translateText("调整下一局设置"), "Adjust next-game settings");
   assert.equal(
     translateText("使用当前设置开始下一局"),
     "Start next game with these settings",

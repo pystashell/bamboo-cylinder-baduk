@@ -16,3 +16,18 @@ test("same-room rematch keeps one settings surface and restores live view contro
   assert.match(htmlSource, /id="start-room-rematch"/);
   assert.doesNotMatch(htmlSource, /id="lobby-overlay"/);
 });
+
+test("finished games expose an immediate rematch without leaving the current opponent", () => {
+  assert.match(htmlSource, /id="post-game-actions"/);
+  assert.match(htmlSource, /id="direct-rematch"/);
+  assert.match(htmlSource, />\s*直接进行下一局\s*</);
+  assert.match(mainSource, /async function startImmediateRematch\(\)/);
+  assert.match(
+    mainSource,
+    /await startNewGame\(getImmediateRematchOptions\(\)\)/,
+  );
+  assert.match(mainSource, /elements\.directRematch\.addEventListener/);
+  assert.match(mainSource, /if \(isAIvsAI\(\)\) aiAutoplayPaused = false/);
+  assert.match(mainSource, /moveInto\("game", \[[\s\S]*"#post-game-actions"/);
+  assert.doesNotMatch(mainSource, /moveInto\("game", \[[\s\S]*"#return-to-lobby"/);
+});

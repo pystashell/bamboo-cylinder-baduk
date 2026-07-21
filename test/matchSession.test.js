@@ -121,6 +121,47 @@ test("AI-controlled turns disable human play without changing transport", () => 
   assert.equal(session.capabilities.resign, true);
 });
 
+test("finished local AI and online hosts can start the next game immediately", () => {
+  const local = createMatchSession({
+    transport: MATCH_TRANSPORT_LOCAL,
+    controllerByColor: { black: MATCH_CONTROLLER_HUMAN, white: MATCH_CONTROLLER_AI },
+    phase: "finished",
+    currentPlayer: "black",
+  });
+  assert.equal(local.capabilities.new_game, true);
+  assert.deepEqual(routeMatchAction(local, "new_game"), {
+    allowed: true,
+    target: MATCH_TRANSPORT_LOCAL,
+    operation: "new_game",
+    payload: {},
+  });
+
+  const onlineBase = {
+    transport: MATCH_TRANSPORT_ONLINE,
+    controllerByColor: { black: MATCH_CONTROLLER_HUMAN, white: MATCH_CONTROLLER_AI },
+    phase: "finished",
+    currentPlayer: "black",
+    connected: true,
+    roomReady: true,
+    bothSeats: true,
+  };
+  const host = createMatchSession({
+    ...onlineBase,
+    identity: { role: "player", color: "black" },
+  });
+  const white = createMatchSession({
+    ...onlineBase,
+    identity: { role: "player", color: "white" },
+  });
+  const spectator = createMatchSession({
+    ...onlineBase,
+    identity: { role: "spectator", color: null },
+  });
+  assert.equal(host.capabilities.new_game, true);
+  assert.equal(white.capabilities.new_game, false);
+  assert.equal(spectator.capabilities.new_game, false);
+});
+
 test("online AI undo routes directly while human online undo negotiates", () => {
   const base = {
     transport: MATCH_TRANSPORT_ONLINE,

@@ -305,7 +305,8 @@ export const ENGLISH_STATIC = Object.freeze({
   "两个人在同一台设备轮流落子": "Two people take turns on the same device",
   "19 × 19 · 竹筒 · 中国规则 · 不计时":
     "19 × 19 · Cylinder · Chinese rules · No clock",
-  "返回房间设置新棋局": "Return to Room and Set Up a New Game",
+  "直接进行下一局": "Start Next Game Now",
+  "返回房间调整设置": "Return to Room and Adjust Settings",
   "重新开始": "Start over",
   "重置弧面": "Reset curved view",
   "长考 · 45 分钟 + 5×60 秒": "Long · 45 minutes + 5×60 seconds",
