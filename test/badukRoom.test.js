@@ -122,3 +122,50 @@ test("stale player commands do not add an unnecessary persistence write", async 
   assert.equal(socket.messages[0].code, "STALE_COMMAND");
   assert.equal(socket.messages[1].type, "state");
 });
+
+test("room persistence never depends on the optional one-way room index", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const writes = [];
+  const background = [];
+  const durableObject = Object.create(BadukRoom.prototype);
+  durableObject.ctx = {
+    storage: {
+      async put(key, value) {
+        writes.push({ key, value });
+      },
+    },
+    waitUntil(promise) {
+      background.push(promise);
+    },
+  };
+  durableObject.env = {
+    BADUK_ROOM_INDEX: {
+      getByName() {
+        return {
+          async fetch() {
+            throw new Error("index unavailable");
+          },
+        };
+      },
+    },
+  };
+  durableObject.engine = {
+    serialize() {
+      return { durable: true };
+    },
+    snapshot() {
+      return {
+        code: "ABC123",
+        revision: 1,
+        players: [],
+        spectators: [],
+        game: { width: 9, height: 9, topology: "cylinder" },
+      };
+    },
+  };
+
+  await durableObject.persist();
+  assert.deepEqual(writes, [{ key: "room", value: { durable: true } }]);
+  assert.equal(background.length, 1);
+  await assert.doesNotReject(background[0]);
+});

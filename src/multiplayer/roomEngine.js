@@ -46,7 +46,29 @@ export const CHAT_MEMBER_REFILL_MS = 1_200;
 export const CHAT_ROOM_BURST = 12;
 export const CHAT_ROOM_REFILL_MS = 300;
 
-const SERIALIZED_SCHEMA_VERSION = 1;
+const SERIALIZED_SCHEMA_VERSION = 2;
+export const MATCH_STATUS_SETUP = "setup";
+export const MATCH_STATUS_INVITED = "invited";
+export const MATCH_STATUS_PLAYING = "playing";
+export const MATCH_STATUS_FINISHED = "finished";
+export const MATCH_MODE_FRIEND = "friend";
+export const MATCH_MODE_HUMAN_AI = "human-ai";
+export const MATCH_MODE_AI_AI = "ai-ai";
+export const MATCH_MODE_LOCAL = "local";
+export const MAX_ROUND_ARCHIVE = 24;
+
+const VALID_MATCH_STATUSES = new Set([
+  MATCH_STATUS_SETUP,
+  MATCH_STATUS_INVITED,
+  MATCH_STATUS_PLAYING,
+  MATCH_STATUS_FINISHED,
+]);
+const VALID_MATCH_MODES = new Set([
+  MATCH_MODE_FRIEND,
+  MATCH_MODE_HUMAN_AI,
+  MATCH_MODE_AI_AI,
+  MATCH_MODE_LOCAL,
+]);
 const TOKEN_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const VALID_COLORS = new Set([BLACK, WHITE]);
 const VALID_SCORING_RULES = new Set(["japanese", "chinese"]);
@@ -209,6 +231,121 @@ function normalizeAIModelId(value, persisted = false) {
   return modelId;
 }
 
+function normalizeMatchMode(value, persisted = false) {
+  const mode = value ?? MATCH_MODE_FRIEND;
+  if (typeof mode !== "string" || !VALID_MATCH_MODES.has(mode)) {
+    throw new RoomEngineError(
+      persisted ? "Persisted match mode is invalid." : "Match mode is invalid.",
+      persisted ? 500 : 400,
+      persisted ? "BAD_ROOM_STATE" : "BAD_REQUEST",
+    );
+  }
+  return mode;
+}
+
+function roundSettingsFromGame(game, timeControl) {
+  const clock = timeControlConfig(timeControl);
+  return {
+    width: game.width,
+    height: game.height,
+    ...(game.width === game.height ? { size: game.width } : {}),
+    komi: game.komi,
+    scoringRule: game.scoringRule,
+    topology: game.topology ?? TOPOLOGY_CYLINDER,
+    mainTimeSeconds: clock?.mainTimeSeconds ?? 0,
+    byoYomiPeriods: clock?.byoYomiPeriods ?? 0,
+    byoYomiSeconds: clock?.byoYomiSeconds ?? 0,
+  };
+}
+
+function normalizeRoundSettings(payload, game, timeControl) {
+  const requestedWidth = normalizeDimension(
+    payload.width ?? payload.size ?? game.width,
+    "board width",
+  );
+  const requestedHeight = normalizeDimension(
+    payload.height ?? payload.size ?? game.height,
+    "board height",
+  );
+  const previousTimeControl = timeControlConfig(timeControl);
+  const requestedTimeControl = roomTimeControlConfig({
+    mainTimeSeconds:
+      payload.mainTimeSeconds ?? previousTimeControl?.mainTimeSeconds ?? 0,
+    byoYomiPeriods:
+      payload.byoYomiPeriods ?? previousTimeControl?.byoYomiPeriods ?? 0,
+    byoYomiSeconds:
+      payload.byoYomiSeconds ?? previousTimeControl?.byoYomiSeconds ?? 0,
+  });
+  return {
+    width: requestedWidth,
+    height: requestedHeight,
+    ...(requestedWidth === requestedHeight ? { size: requestedWidth } : {}),
+    komi: normalizeKomi(payload.komi ?? game.komi),
+    scoringRule: normalizeScoringRule(payload.scoringRule ?? game.scoringRule),
+    topology: normalizeTopology(
+      payload.topology ?? game.topology ?? TOPOLOGY_CYLINDER,
+    ),
+    mainTimeSeconds: requestedTimeControl?.mainTimeSeconds ?? 0,
+    byoYomiPeriods: requestedTimeControl?.byoYomiPeriods ?? 0,
+    byoYomiSeconds: requestedTimeControl?.byoYomiSeconds ?? 0,
+  };
+}
+
+function gameFromRoundSettings(settings) {
+  return new GoEngine({
+    ...(settings.width === settings.height ? { size: settings.width } : {}),
+    width: settings.width,
+    height: settings.height,
+    komi: settings.komi,
+    scoringRule: settings.scoringRule,
+    topology: settings.topology,
+  });
+}
+
+function timeControlFromRoundSettings(settings, now) {
+  return freshRoomTimeControl(
+    roomTimeControlConfig({
+      mainTimeSeconds: settings.mainTimeSeconds,
+      byoYomiPeriods: settings.byoYomiPeriods,
+      byoYomiSeconds: settings.byoYomiSeconds,
+    }),
+    now,
+  );
+}
+
+function controller(kind, operatorId, modelId) {
+  return {
+    kind,
+    operatorId: operatorId ?? null,
+    ...(kind === "ai" ? { modelId: normalizeAIModelId(modelId) } : {}),
+  };
+}
+
+function controllersForMode({ mode, hostId, whiteId = null, aiModelId = "b10" }) {
+  if (mode === MATCH_MODE_LOCAL) {
+    return {
+      [BLACK]: controller("human", hostId),
+      [WHITE]: controller("human", hostId),
+    };
+  }
+  if (mode === MATCH_MODE_HUMAN_AI) {
+    return {
+      [BLACK]: controller("human", hostId),
+      [WHITE]: controller("ai", hostId, aiModelId),
+    };
+  }
+  if (mode === MATCH_MODE_AI_AI) {
+    return {
+      [BLACK]: controller("ai", hostId, aiModelId),
+      [WHITE]: controller("ai", hostId, aiModelId),
+    };
+  }
+  return {
+    [BLACK]: controller("human", hostId),
+    [WHITE]: controller("human", whiteId),
+  };
+}
+
 function normalizeRole(value) {
   if (!isRoomRole(value)) {
     throw new RoomEngineError("房间身份无效。", 400, "BAD_REQUEST");
@@ -298,6 +435,9 @@ function positionToken(game, roomState) {
   );
   return fingerprint("pos", {
     positionEpoch: roomState.positionEpoch,
+    roundId: roomState.match?.roundId ?? 1,
+    roundStatus: roomState.match?.status ?? MATCH_STATUS_PLAYING,
+    controllers: roomState.match?.controllers ?? null,
     width: state.width ?? state.size,
     height: state.height ?? state.size,
     komi: state.komi,
@@ -489,6 +629,135 @@ function spendChatToken(bucket, capacity, refillMs, now) {
   };
 }
 
+function migrateSerializedState(value) {
+  const state = clone(value);
+  if (!state || typeof state !== "object") return state;
+  if (state.schemaVersion === SERIALIZED_SCHEMA_VERSION) return state;
+  if (state.schemaVersion !== 1) return state;
+
+  const host = state.members?.find(
+    (member) =>
+      member.role === "player" &&
+      member.automated !== true &&
+      member.color === BLACK,
+  );
+  const white = state.members?.find(
+    (member) =>
+      member.role === "player" &&
+      member.automated !== true &&
+      member.color === WHITE,
+  );
+  const automated = state.members?.find(
+    (member) => member.role === "player" && member.automated === true,
+  );
+  const gamePhase = state.game?.phase;
+  const timedOut = Boolean(state.timeControl?.outcome);
+  const resigned = Boolean(state.resignationOutcome);
+  const finished = gamePhase === PHASE_FINISHED || timedOut || resigned;
+  const mode = automated ? MATCH_MODE_HUMAN_AI : MATCH_MODE_FRIEND;
+  state.schemaVersion = SERIALIZED_SCHEMA_VERSION;
+  state.match = {
+    roundId: 1,
+    status: finished ? MATCH_STATUS_FINISHED : MATCH_STATUS_PLAYING,
+    mode,
+    controllers: automated
+      ? controllersForMode({
+          mode,
+          hostId: host?.playerId ?? automated.controllerId,
+          aiModelId: automated.modelId,
+        })
+      : controllersForMode({
+          mode,
+          hostId: host?.playerId ?? null,
+          whiteId: white?.playerId ?? null,
+        }),
+    request: null,
+    startedAt: state.createdAt ?? state.updatedAt,
+    finishedAt: finished
+      ? state.timeControl?.outcome?.finishedAt ??
+        state.resignationOutcome?.finishedAt ??
+        state.updatedAt
+      : null,
+  };
+  state.roundArchive = [];
+  // Persisted v1 rooms retain the old immediate `new_game` command. Fresh
+  // setup-first rooms never enable this compatibility escape hatch.
+  state.allowLegacyNewGame = true;
+  return state;
+}
+
+function validController(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    (value.kind === "human" || value.kind === "ai") &&
+    (value.operatorId === null ||
+      (typeof value.operatorId === "string" &&
+        value.operatorId.length > 0 &&
+        value.operatorId.length <= 128)) &&
+    (value.kind !== "ai" || VALID_AI_MODELS.has(value.modelId)),
+  );
+}
+
+function validateMatchState(state) {
+  const match = state.match;
+  if (
+    !match ||
+    typeof match !== "object" ||
+    !Number.isSafeInteger(match.roundId) ||
+    match.roundId < 0 ||
+    !VALID_MATCH_STATUSES.has(match.status) ||
+    !VALID_MATCH_MODES.has(match.mode) ||
+    !validController(match.controllers?.[BLACK]) ||
+    !validController(match.controllers?.[WHITE]) ||
+    (match.startedAt !== null && !Number.isFinite(match.startedAt)) ||
+    (match.finishedAt !== null && !Number.isFinite(match.finishedAt))
+  ) {
+    throw new RoomEngineError(
+      "Persisted match state is invalid.",
+      500,
+      "BAD_ROOM_STATE",
+    );
+  }
+  if (match.request !== null) {
+    const request = match.request;
+    if (
+      match.status !== MATCH_STATUS_INVITED ||
+      !request ||
+      typeof request !== "object" ||
+      !Number.isSafeInteger(request.requestRevision) ||
+      request.requestRevision < 1 ||
+      typeof request.requestedBy !== "string" ||
+      !VALID_MATCH_MODES.has(request.mode) ||
+      request.mode !== MATCH_MODE_FRIEND ||
+      !validController(request.controllers?.[BLACK]) ||
+      !validController(request.controllers?.[WHITE]) ||
+      !Number.isFinite(request.requestedAt) ||
+      !request.settings ||
+      typeof request.settings !== "object"
+    ) {
+      throw new RoomEngineError(
+        "Persisted game invitation is invalid.",
+        500,
+        "BAD_ROOM_STATE",
+      );
+    }
+  } else if (match.status === MATCH_STATUS_INVITED) {
+    throw new RoomEngineError(
+      "Persisted game invitation is missing.",
+      500,
+      "BAD_ROOM_STATE",
+    );
+  }
+  if (!Array.isArray(state.roundArchive) || state.roundArchive.length > MAX_ROUND_ARCHIVE) {
+    throw new RoomEngineError(
+      "Persisted round archive is invalid.",
+      500,
+      "BAD_ROOM_STATE",
+    );
+  }
+}
+
 function validateSerializedState(state) {
   if (
     !state ||
@@ -510,6 +779,8 @@ function validateSerializedState(state) {
       "BAD_ROOM_STATE",
     );
   }
+
+  validateMatchState(state);
 
   const colors = new Set();
   let automatedPlayers = 0;
@@ -643,6 +914,7 @@ export class RoomEngine {
     topology = TOPOLOGY_CYLINDER,
     playerId,
     tokenHash,
+    startImmediately = true,
     now: nowInput,
   }) {
     const now = readNow(nowInput);
@@ -670,6 +942,25 @@ export class RoomEngine {
       scoringRule: normalizeScoringRule(scoringRule),
       topology: normalizeTopology(topology),
     });
+    if (typeof startImmediately !== "boolean") {
+      throw new RoomEngineError(
+        "startImmediately must be a boolean.",
+        400,
+        "BAD_REQUEST",
+      );
+    }
+    const initialMatch = {
+      roundId: startImmediately ? 1 : 0,
+      status: startImmediately ? MATCH_STATUS_PLAYING : MATCH_STATUS_SETUP,
+      mode: MATCH_MODE_FRIEND,
+      controllers: controllersForMode({
+        mode: MATCH_MODE_FRIEND,
+        hostId: normalizedPlayerId,
+      }),
+      request: null,
+      startedAt: startImmediately ? now : null,
+      finishedAt: null,
+    };
     const state = {
       schemaVersion: SERIALIZED_SCHEMA_VERSION,
       code,
@@ -679,6 +970,9 @@ export class RoomEngine {
       scoreConfirmations: [],
       undoRequest: null,
       resignationOutcome: null,
+      match: initialMatch,
+      roundArchive: [],
+      allowLegacyNewGame: startImmediately,
       timeControl,
       chatSequence: 0,
       chatMessages: [],
@@ -721,12 +1015,15 @@ export class RoomEngine {
         "BAD_ROOM_STATE",
       );
     }
+    state = migrateSerializedState(state);
     validateSerializedState(state);
     state.moveCount ??= 0;
     state.positionEpoch ??= 1;
     state.scoreConfirmations ??= [];
     state.undoRequest ??= null;
     state.resignationOutcome ??= null;
+    state.roundArchive ??= [];
+    state.allowLegacyNewGame ??= false;
     state.timeControl = persistedRoomTimeControl(state.timeControl);
     state.chatMessages = trimStoredChatHistory(state.chatMessages);
     const latestChatSequence = state.chatMessages.reduce(
@@ -886,6 +1183,17 @@ export class RoomEngine {
       revision: this.state.revision,
       version: this.state.revision,
       positionToken: positionToken(this.game, this.state),
+      match: clone(this.state.match),
+      roundArchive: clone(this.state.roundArchive),
+      rounds: this.state.roundArchive.map((round) => ({
+        roundId: round.roundId,
+        startedAt: round.startedAt,
+        finishedAt: round.finishedAt,
+        result: clone(round.result),
+        settings: clone(round.settings),
+        mode: round.mode,
+        moveCount: round.moveCount,
+      })),
       moveCount: this.state.moveCount,
       replay,
       undoAvailable:
@@ -1004,6 +1312,7 @@ export class RoomEngine {
       const automatedPlayer = this.automatedPlayer();
       if (automatedPlayer) automatedPlayer.controllerId = member.playerId;
     }
+    this.refreshFriendControllers();
     this.syncTimeControlRunning(now);
     this.commit(now);
     return {
@@ -1119,6 +1428,7 @@ export class RoomEngine {
     this.state.members = this.state.members.filter(
       (candidate) => candidate.playerId !== member.playerId,
     );
+    this.refreshFriendControllers();
     for (const [connectionId, connectedPlayerId] of this.connections) {
       if (connectedPlayerId === member.playerId) {
         this.connections.delete(connectionId);
@@ -1270,7 +1580,12 @@ export class RoomEngine {
 
     this.requirePlayer(member);
     const managesSeatsOrStartsGame =
-      action === "attach_ai" || action === "detach_ai" || action === "new_game";
+      action === "attach_ai" ||
+      action === "detach_ai" ||
+      action === "request_game" ||
+      action === "respond_game" ||
+      action === "cancel_game_request" ||
+      action === "new_game";
     if (this.state.resignationOutcome && !managesSeatsOrStartsGame) {
       throw new RoomEngineError(
         "本局已经因认输结束。",
@@ -1346,6 +1661,14 @@ export class RoomEngine {
           controllerId: member.playerId,
         };
       }
+      if (this.state.match?.status === MATCH_STATUS_PLAYING) {
+        this.state.match.mode = MATCH_MODE_HUMAN_AI;
+        this.state.match.controllers = controllersForMode({
+          mode: MATCH_MODE_HUMAN_AI,
+          hostId: member.playerId,
+          aiModelId: modelId,
+        });
+      }
     } else if (action === "detach_ai") {
       const automated = this.requireAutomatedPlayer(member);
       this.state.members = this.state.members.filter(
@@ -1364,37 +1687,119 @@ export class RoomEngine {
         color: automated.color,
         modelId: automated.modelId,
       };
+      if (this.state.match?.status === MATCH_STATUS_PLAYING) {
+        this.state.match.mode = MATCH_MODE_FRIEND;
+        this.state.match.controllers = controllersForMode({
+          mode: MATCH_MODE_FRIEND,
+          hostId: member.playerId,
+          whiteId: this.humanWhitePlayer()?.playerId ?? null,
+        });
+      }
+    } else if (action === "request_game") {
+      move = this.requestGame(member, payload, now);
+    } else if (action === "respond_game") {
+      const request = this.requireCurrentGameRequest(payload.requestRevision);
+      const responder = request.controllers[WHITE];
+      if (
+        responder.kind !== "human" ||
+        responder.operatorId !== member.playerId ||
+        member.playerId === request.requestedBy
+      ) {
+        throw new RoomEngineError(
+          "Only the invited opponent may answer this invitation.",
+          403,
+          "FORBIDDEN",
+        );
+      }
+      if (typeof payload.accept !== "boolean") {
+        throw new RoomEngineError(
+          "Choose whether to accept or decline the invitation.",
+          400,
+          "BAD_REQUEST",
+        );
+      }
+      if (payload.accept) {
+        this.startRound({
+          settings: request.settings,
+          mode: request.mode,
+          controllers: request.controllers,
+          now,
+        });
+        move = {
+          ok: true,
+          type: "game_request_accepted",
+          requestRevision: request.requestRevision,
+          mode: request.mode,
+          phase: PHASE_PLAY,
+        };
+      } else {
+        this.state.match.status = request.previousStatus === MATCH_STATUS_FINISHED
+          ? MATCH_STATUS_FINISHED
+          : MATCH_STATUS_SETUP;
+        this.state.match.request = null;
+        move = {
+          ok: true,
+          type: "game_request_declined",
+          requestRevision: request.requestRevision,
+        };
+      }
+    } else if (action === "cancel_game_request") {
+      const request = this.requireCurrentGameRequest(payload.requestRevision);
+      if (request.requestedBy !== member.playerId) {
+        throw new RoomEngineError(
+          "Only the inviter may cancel this invitation.",
+          403,
+          "FORBIDDEN",
+        );
+      }
+      this.state.match.status = request.previousStatus === MATCH_STATUS_FINISHED
+        ? MATCH_STATUS_FINISHED
+        : MATCH_STATUS_SETUP;
+      this.state.match.request = null;
+      move = {
+        ok: true,
+        type: "game_request_cancelled",
+        requestRevision: request.requestRevision,
+      };
     } else if (action === "play") {
       this.assertNoUndoRequest();
       this.requireBothPlayers();
-      this.assertTurn(member);
+      this.assertControllerTurn(member, "human");
       const row = validateCoordinate(payload.row, "行");
       const col = validateCoordinate(payload.col, "列");
       move = this.game.play(row, col);
     } else if (action === "pass") {
       this.assertNoUndoRequest();
       this.requireBothPlayers();
-      this.assertTurn(member);
+      this.assertControllerTurn(member, "human");
       move = this.game.pass();
     } else if (action === "ai_play") {
       this.assertNoUndoRequest();
-      const automated = this.requireAutomatedPlayer(member);
       this.requireBothPlayers();
       this.assertFreshPosition(payload);
-      this.assertAutomatedTurn(automated);
+      this.assertControllerTurn(member, "ai");
       const row = validateCoordinate(payload.row, "行");
       const col = validateCoordinate(payload.col, "列");
       move = this.game.play(row, col);
     } else if (action === "ai_pass") {
       this.assertNoUndoRequest();
-      const automated = this.requireAutomatedPlayer(member);
       this.requireBothPlayers();
       this.assertFreshPosition(payload);
-      this.assertAutomatedTurn(automated);
+      this.assertControllerTurn(member, "ai");
       move = this.game.pass();
     } else if (action === "direct_undo_ai_round") {
       this.assertNoUndoRequest();
-      this.requireAutomatedPlayer(member);
+      this.assertGamePlaying();
+      if (![BLACK, WHITE].some((color) => {
+        const value = this.controllerFor(color);
+        return value?.kind === "ai" && value.operatorId === member.playerId;
+      })) {
+        throw new RoomEngineError(
+          "There is no AI controller operated by this browser.",
+          409,
+          "AI_NOT_ATTACHED",
+        );
+      }
       this.assertFreshPosition(payload);
       if (this.game.phase !== PHASE_PLAY) {
         throw new RoomEngineError(
@@ -1453,6 +1858,66 @@ export class RoomEngine {
         currentPlayer: this.game.currentPlayer,
         phase: this.game.phase,
       };
+    } else if (action === "direct_undo_local_round") {
+      if (this.state.match?.status !== MATCH_STATUS_PLAYING) {
+        throw new RoomEngineError(
+          "Only a game in progress can be undone.",
+          409,
+          "UNDO_UNAVAILABLE",
+        );
+      }
+
+      const blackController = this.controllerFor(BLACK);
+      const whiteController = this.controllerFor(WHITE);
+      const sharedOperatorId = blackController?.operatorId;
+      if (
+        blackController?.kind !== "human" ||
+        whiteController?.kind !== "human" ||
+        typeof sharedOperatorId !== "string" ||
+        sharedOperatorId.length === 0 ||
+        whiteController.operatorId !== sharedOperatorId ||
+        sharedOperatorId !== member.playerId
+      ) {
+        throw new RoomEngineError(
+          "Direct local undo requires both human colors to be controlled by this browser.",
+          403,
+          "FORBIDDEN",
+        );
+      }
+
+      this.assertNoUndoRequest();
+      this.assertFreshPosition(payload);
+      if (this.game.phase !== PHASE_PLAY || !this.game.canUndo()) {
+        throw new RoomEngineError(
+          "There is no move available to undo during play.",
+          409,
+          "UNDO_UNAVAILABLE",
+        );
+      }
+
+      if (
+        this.state.timeControl &&
+        !this.state.timeControl.outcome &&
+        this.state.timeControl.activeColor !== null
+      ) {
+        this.state.timeControl = pauseTimeControl(this.state.timeControl, now);
+      }
+
+      const undone = this.game.undo();
+      if (!undone.ok) {
+        throw new RoomEngineError(
+          "There is no move available to undo during play.",
+          409,
+          "UNDO_UNAVAILABLE",
+        );
+      }
+      this.state.moveCount = Math.max(0, this.state.moveCount - 1);
+      move = {
+        ...clone(undone),
+        type: "local_move_undone",
+        currentPlayer: this.game.currentPlayer,
+        phase: this.game.phase,
+      };
     } else if (action === "resign") {
       this.requireBothPlayers();
       if (this.game.phase !== PHASE_PLAY) {
@@ -1466,7 +1931,11 @@ export class RoomEngine {
       const lastMove = clone(this.game.lastMove);
       const currentPlayer = this.game.currentPlayer;
       const consecutivePasses = this.game.consecutivePasses;
-      const loser = member.color;
+      const loser = payload.color ?? member.color;
+      if (!VALID_COLORS.has(loser)) {
+        throw new RoomEngineError("Resigning color is invalid.", 400, "BAD_REQUEST");
+      }
+      this.assertController(member, loser);
       const winner = loser === BLACK ? WHITE : BLACK;
       while (this.game.phase === PHASE_PLAY) {
         const pass = this.game.pass();
@@ -1502,15 +1971,22 @@ export class RoomEngine {
         phase: PHASE_FINISHED,
       };
     } else if (action === "toggle_dead") {
+      this.assertAnyController(member);
       const row = validateCoordinate(payload.row, "行");
       const col = validateCoordinate(payload.col, "列");
       move = this.game.toggleDead(row, col);
     } else if (action === "finish_scoring") {
+      this.assertAnyController(member);
       if (this.game.phase !== PHASE_SCORING) {
         move = this.game.finishScoring();
       } else {
-        if (!this.state.scoreConfirmations.includes(member.color)) {
-          this.state.scoreConfirmations.push(member.color);
+        const controlledColors = [BLACK, WHITE].filter(
+          (color) => this.controllerFor(color)?.operatorId === member.playerId,
+        );
+        for (const color of controlledColors) {
+          if (!this.state.scoreConfirmations.includes(color)) {
+            this.state.scoreConfirmations.push(color);
+          }
         }
         const automated = this.automatedPlayer();
         if (
@@ -1544,10 +2020,12 @@ export class RoomEngine {
         }
       }
     } else if (action === "resume_play") {
+      this.assertAnyController(member);
       move = this.game.resumePlay(this.game.currentPlayer);
     } else if (action === "request_undo") {
+      this.assertAnyController(member, "human");
       this.requireBothPlayers();
-      if (this.automatedPlayer()) {
+      if ([BLACK, WHITE].some((color) => this.controllerFor(color)?.kind === "ai")) {
         throw new RoomEngineError(
           "AI 对局请直接撤回上一轮，不需要发送申请。",
           409,
@@ -1603,6 +2081,7 @@ export class RoomEngine {
         undoRequest: clone(this.state.undoRequest),
       };
     } else if (action === "respond_undo") {
+      this.assertAnyController(member, "human");
       const request = this.requireCurrentUndoRequest(
         payload.targetMoveCount,
         payload.requestRevision,
@@ -1666,6 +2145,7 @@ export class RoomEngine {
         };
       }
     } else if (action === "cancel_undo") {
+      this.assertAnyController(member, "human");
       const request = this.requireCurrentUndoRequest(
         payload.targetMoveCount,
         payload.requestRevision,
@@ -1687,6 +2167,10 @@ export class RoomEngine {
         requestRevision: request.requestRevision,
       };
     } else if (action === "new_game") {
+      this.requireHost(member);
+      if (!this.state.allowLegacyNewGame) {
+        move = this.requestGame(member, payload, now);
+      } else {
       if (member.color !== BLACK) {
         throw new RoomEngineError(
           "只有黑方可以开始新的一局。",
@@ -1723,12 +2207,32 @@ export class RoomEngine {
           payload.topology ?? this.game.topology ?? TOPOLOGY_CYLINDER,
         ),
       });
+      this.archiveCurrentRound(now);
       this.game = newGame;
       this.state.resignationOutcome = null;
       this.state.timeControl = freshRoomTimeControl(requestedTimeControl, now);
       this.state.moveCount = 0;
       this.state.undoRequest = null;
+      const legacyMode = normalizeMatchMode(
+        payload.mode ??
+          (this.automatedPlayer() ? MATCH_MODE_HUMAN_AI : this.state.match?.mode),
+      );
+      this.state.match = {
+        roundId: (this.state.match?.roundId ?? 0) + 1,
+        status: MATCH_STATUS_PLAYING,
+        mode: legacyMode,
+        controllers: controllersForMode({
+          mode: legacyMode,
+          hostId: member.playerId,
+          whiteId: this.humanWhitePlayer()?.playerId ?? null,
+          aiModelId: payload.aiModelId ?? this.automatedPlayer()?.modelId ?? "b10",
+        }),
+        request: null,
+        startedAt: now,
+        finishedAt: null,
+      };
       move = { ok: true, type: "new_game", phase: PHASE_PLAY };
+      }
     } else {
       throw new RoomEngineError("无法识别这条命令。", 400, "BAD_REQUEST");
     }
@@ -1750,14 +2254,19 @@ export class RoomEngine {
       action === "attach_ai" ||
       action === "detach_ai" ||
       action === "direct_undo_ai_round" ||
+      action === "direct_undo_local_round" ||
       action === "resign" ||
       action === "toggle_dead" ||
       action === "finish_scoring" ||
       action === "resume_play" ||
+      action === "request_game" ||
+      action === "respond_game" ||
+      action === "cancel_game_request" ||
       action === "new_game" ||
       (action === "respond_undo" && move.type === "undo_accepted");
 
     this.updateTimeControlAfterAction(action, now);
+    this.markRoundFinished(now);
 
     if (
       action === "play" ||
@@ -1765,6 +2274,7 @@ export class RoomEngine {
       action === "ai_play" ||
       action === "ai_pass" ||
       action === "direct_undo_ai_round" ||
+      action === "direct_undo_local_round" ||
       action === "resign" ||
       action === "toggle_dead" ||
       action === "resume_play" ||
@@ -1775,6 +2285,7 @@ export class RoomEngine {
 
     if (
       action === "direct_undo_ai_round" ||
+      action === "direct_undo_local_round" ||
       action === "resign" ||
       action === "resume_play" ||
       action === "new_game"
@@ -1919,6 +2430,7 @@ export class RoomEngine {
       this.state.timeControl = advancedClock;
       this.state.undoRequest = null;
       this.state.scoreConfirmations = [];
+      this.markRoundFinished(now);
       this.commit(now);
       return {
         changed: true,
@@ -1987,6 +2499,265 @@ export class RoomEngine {
         member.automated !== true &&
         member.color === BLACK,
     ) ?? null;
+  }
+
+  humanWhitePlayer() {
+    return this.state.members.find(
+      (member) =>
+        member.role === "player" &&
+        member.automated !== true &&
+        member.color === WHITE,
+    ) ?? null;
+  }
+
+  refreshFriendControllers() {
+    const hostId = this.hostPlayer()?.playerId ?? null;
+    const whiteId = this.humanWhitePlayer()?.playerId ?? null;
+    if (this.state.match?.mode === MATCH_MODE_FRIEND) {
+      this.state.match.controllers = controllersForMode({
+        mode: MATCH_MODE_FRIEND,
+        hostId,
+        whiteId,
+      });
+    }
+    if (this.state.match?.request?.mode === MATCH_MODE_FRIEND) {
+      this.state.match.request.controllers = controllersForMode({
+        mode: MATCH_MODE_FRIEND,
+        hostId,
+        whiteId,
+      });
+    }
+  }
+
+  controllerFor(color) {
+    return this.state.match?.controllers?.[color] ?? null;
+  }
+
+  controllerOperatorPresent(value) {
+    return Boolean(
+      value?.operatorId &&
+      this.state.members.some(
+        (member) =>
+          member.role === "player" &&
+          member.automated !== true &&
+          member.playerId === value.operatorId,
+      ),
+    );
+  }
+
+  assertGamePlaying() {
+    if (
+      this.state.match?.status === MATCH_STATUS_FINISHED &&
+      (this.game.phase === PHASE_FINISHED || this.currentRoundResult())
+    ) {
+      // Let the action-specific phase validation preserve the established
+      // ILLEGAL_MOVE / UNDO_UNAVAILABLE error contract for finished games.
+      return;
+    }
+    if (this.state.match?.status !== MATCH_STATUS_PLAYING) {
+      throw new RoomEngineError(
+        "The game has not started yet.",
+        409,
+        this.state.match?.status === MATCH_STATUS_INVITED
+          ? "GAME_INVITATION_PENDING"
+          : "GAME_NOT_STARTED",
+      );
+    }
+  }
+
+  assertController(member, color, expectedKind = null) {
+    const value = this.controllerFor(color);
+    if (
+      !value ||
+      value.operatorId !== member.playerId ||
+      (expectedKind !== null && value.kind !== expectedKind)
+    ) {
+      const controlledElsewhere = [BLACK, WHITE].some((candidate) => {
+        const controllerValue = this.controllerFor(candidate);
+        return (
+          controllerValue?.operatorId === member.playerId &&
+          (expectedKind === null || controllerValue.kind === expectedKind)
+        );
+      });
+      throw new RoomEngineError(
+        "This browser does not control that color.",
+        controlledElsewhere ? 409 : 403,
+        controlledElsewhere
+          ? expectedKind === "ai"
+            ? "NOT_AI_TURN"
+            : "NOT_YOUR_TURN"
+          : "FORBIDDEN",
+      );
+    }
+    return value;
+  }
+
+  assertAnyController(member, expectedKind = null) {
+    const value = [BLACK, WHITE]
+      .map((color) => this.controllerFor(color))
+      .find(
+        (candidate) =>
+          candidate?.operatorId === member.playerId &&
+          (expectedKind === null || candidate.kind === expectedKind),
+      );
+    if (!value) {
+      throw new RoomEngineError(
+        "This browser does not control either color.",
+        403,
+        "FORBIDDEN",
+      );
+    }
+    return value;
+  }
+
+  assertControllerTurn(member, expectedKind) {
+    this.assertGamePlaying();
+    if (this.game.phase !== PHASE_PLAY) {
+      throw new RoomEngineError(
+        "The game is not accepting moves.",
+        409,
+        "ILLEGAL_MOVE",
+      );
+    }
+    return this.assertController(member, this.game.currentPlayer, expectedKind);
+  }
+
+  currentRoundResult() {
+    if (this.state.timeControl?.outcome) return clone(this.state.timeControl.outcome);
+    const resignation = publicResignationResult(this.state.resignationOutcome);
+    if (resignation) {
+      return {
+        ...resignation,
+        finishedAt: this.state.resignationOutcome.finishedAt,
+      };
+    }
+    return clone(this.game.result ?? null);
+  }
+
+  markRoundFinished(now) {
+    if (this.state.match?.status !== MATCH_STATUS_PLAYING) return false;
+    const result = this.currentRoundResult();
+    if (!result && this.game.phase !== PHASE_FINISHED) return false;
+    this.state.match.status = MATCH_STATUS_FINISHED;
+    this.state.match.finishedAt = result?.finishedAt ?? now;
+    return true;
+  }
+
+  archiveCurrentRound(now) {
+    const match = this.state.match;
+    if (!match || match.roundId < 1 || match.startedAt === null) return;
+    if (this.state.roundArchive.some((round) => round.roundId === match.roundId)) {
+      return;
+    }
+    const result = this.currentRoundResult();
+    const replay = snapshotReplay(this.game);
+    if (result) replay.outcome = clone(result);
+    this.state.roundArchive.push({
+      roundId: match.roundId,
+      startedAt: match.startedAt,
+      finishedAt: match.finishedAt ?? result?.finishedAt ?? now,
+      result,
+      settings: roundSettingsFromGame(this.game, this.state.timeControl),
+      mode: match.mode,
+      controllers: clone(match.controllers),
+      moveCount: this.state.moveCount,
+      replay,
+    });
+    this.state.roundArchive = this.state.roundArchive.slice(-MAX_ROUND_ARCHIVE);
+  }
+
+  startRound({ settings, mode, controllers, now }) {
+    this.archiveCurrentRound(now);
+    this.game = gameFromRoundSettings(settings);
+    this.state.timeControl = timeControlFromRoundSettings(settings, now);
+    this.state.resignationOutcome = null;
+    this.state.moveCount = 0;
+    this.state.undoRequest = null;
+    this.state.scoreConfirmations = [];
+    this.state.match = {
+      roundId: (this.state.match?.roundId ?? 0) + 1,
+      status: MATCH_STATUS_PLAYING,
+      mode,
+      controllers: clone(controllers),
+      request: null,
+      startedAt: now,
+      finishedAt: null,
+    };
+  }
+
+  requestGame(member, payload, now) {
+    this.requireHost(member);
+    if (
+      this.state.match?.status === MATCH_STATUS_PLAYING &&
+      !this.currentRoundResult() &&
+      this.game.phase !== PHASE_FINISHED
+    ) {
+      throw new RoomEngineError(
+        "Finish the current game before proposing another one.",
+        409,
+        "GAME_IN_PROGRESS",
+      );
+    }
+    const mode = normalizeMatchMode(payload.mode ?? this.state.match?.mode);
+    const settings = normalizeRoundSettings(payload, this.game, this.state.timeControl);
+    const controllers = controllersForMode({
+      mode,
+      hostId: member.playerId,
+      whiteId: this.humanWhitePlayer()?.playerId ?? null,
+      aiModelId: payload.aiModelId ?? "b10",
+    });
+    if (mode !== MATCH_MODE_FRIEND) {
+      this.startRound({ settings, mode, controllers, now });
+      return {
+        ok: true,
+        type: "game_started",
+        mode,
+        phase: PHASE_PLAY,
+      };
+    }
+    const previousStatus = this.state.match?.request?.previousStatus ??
+      (this.state.match?.status === MATCH_STATUS_FINISHED
+        ? MATCH_STATUS_FINISHED
+        : MATCH_STATUS_SETUP);
+    this.state.match = {
+      ...this.state.match,
+      status: MATCH_STATUS_INVITED,
+      request: {
+        requestRevision: this.state.revision + 1,
+        requestedBy: member.playerId,
+        mode,
+        controllers,
+        settings,
+        requestedAt: now,
+        previousStatus,
+      },
+      finishedAt:
+        this.state.match?.status === MATCH_STATUS_FINISHED
+          ? this.state.match.finishedAt
+          : null,
+    };
+    return {
+      ok: true,
+      type: "game_requested",
+      request: clone(this.state.match.request),
+    };
+  }
+
+  requireCurrentGameRequest(requestRevision) {
+    const request = this.state.match?.request;
+    if (
+      this.state.match?.status !== MATCH_STATUS_INVITED ||
+      !request ||
+      !Number.isSafeInteger(requestRevision) ||
+      request.requestRevision !== requestRevision
+    ) {
+      throw new RoomEngineError(
+        "This game invitation is no longer current.",
+        409,
+        "STALE_GAME_REQUEST",
+      );
+    }
+    return clone(request);
   }
 
   requireMember(playerId) {
@@ -2068,12 +2839,8 @@ export class RoomEngine {
   }
 
   requireBothPlayers() {
-    const colors = new Set(
-      this.state.members
-        .filter((member) => member.role === "player")
-        .map((member) => member.color),
-    );
-    if (!colors.has(BLACK) || !colors.has(WHITE)) {
+    this.assertGamePlaying();
+    if (!this.hasBothPlayers()) {
       throw new RoomEngineError(
         "请等待黑白双方都加入房间后再开始对局。",
         409,
@@ -2083,18 +2850,17 @@ export class RoomEngine {
   }
 
   hasBothPlayers() {
-    const colors = new Set(
-      this.state.members
-        .filter((member) => member.role === "player")
-        .map((member) => member.color),
+    return (
+      this.controllerOperatorPresent(this.controllerFor(BLACK)) &&
+      this.controllerOperatorPresent(this.controllerFor(WHITE))
     );
-    return colors.has(BLACK) && colors.has(WHITE);
   }
 
   shouldTimeControlRun() {
     return Boolean(
       this.state.timeControl &&
       !this.state.timeControl.outcome &&
+      this.state.match?.status === MATCH_STATUS_PLAYING &&
       this.game.phase === PHASE_PLAY &&
       this.hasBothPlayers() &&
       !this.state.undoRequest,

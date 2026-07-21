@@ -13,6 +13,7 @@ import {
   encodeTokenProtocol,
   normalizePlayerName,
   normalizeRoomCode,
+  parseAppRoute,
   parseShareUrl,
 } from "../src/multiplayer/roomClient.js";
 
@@ -102,7 +103,7 @@ test("room codes, player names, and share links normalize predictably", () => {
   );
   assert.equal(
     shareUrl,
-    "https://baduk.example/play?theme=bamboo&room=AB12CD",
+    "https://baduk.example/online/AB12CD",
   );
   assert.deepEqual(parseShareUrl(shareUrl), {
     roomCode: "AB12CD",
@@ -114,9 +115,40 @@ test("room codes, player names, and share links normalize predictably", () => {
     "XY99ZZ",
   );
   assert.equal(
+    parseShareUrl("https://baduk.example/online/xy99zz").roomCode,
+    "XY99ZZ",
+  );
+  assert.equal(
     parseShareUrl("#room=QW12ER", "https://baduk.example/play").roomCode,
     "QW12ER",
   );
+});
+
+test("app routes keep the hidden lobby separate from single and online play", () => {
+  assert.deepEqual(parseAppRoute("https://baduk.example/"), {
+    mode: "root",
+    roomCode: "",
+    role: "",
+  });
+  assert.deepEqual(parseAppRoute("https://baduk.example/single/"), {
+    mode: "single",
+    roomCode: "",
+    role: "",
+  });
+  assert.deepEqual(
+    parseAppRoute("https://baduk.example/online/ab12cd?role=spectator"),
+    { mode: "online", roomCode: "AB12CD", role: "spectator" },
+  );
+  assert.deepEqual(parseAppRoute("https://baduk.example/lobby"), {
+    mode: "lobby",
+    roomCode: "",
+    role: "",
+  });
+  assert.deepEqual(parseAppRoute("https://baduk.example/not-a-public-route"), {
+    mode: "single",
+    roomCode: "",
+    role: "",
+  });
 });
 
 test("token subprotocol is WebSocket-safe and reversible", () => {
@@ -139,6 +171,21 @@ test("the injectable token store persists and removes a room session", () => {
   assert.deepEqual(store.get("AB12CD"), session);
   assert.equal(store.remove("AB12CD"), true);
   assert.equal(store.get("AB12CD"), null);
+});
+
+test("room clients can detect a resumable room without exposing its token", () => {
+  const storage = createMemoryStorage();
+  const tokenStore = createTokenStore(storage, { prefix: "test." });
+  tokenStore.set("AB12CD", { code: "AB12CD", token: "secret", nextSequence: 1 });
+  const client = new RoomClient({
+    tokenStore,
+    fetchImpl: async () => jsonResponse({}),
+    WebSocketImpl: MockWebSocket,
+  });
+
+  assert.equal(client.hasStoredSession("ab12cd"), true);
+  assert.equal(client.hasStoredSession("bad-code"), false);
+  assert.equal(client.hasStoredSession("ZZ99ZZ"), false);
 });
 
 test("command envelopes use a stable id and increasing sequence", () => {
@@ -195,7 +242,7 @@ test("RoomClient creates a room, emits state, and resolves commands on ACK", asy
     size: 13,
   });
   assert.equal(result.roomCode, "AB12CD");
-  assert.equal(result.shareUrl, "https://baduk.example/play?room=AB12CD");
+  assert.equal(result.shareUrl, "https://baduk.example/online/AB12CD");
   assert.equal(client.code, "AB12CD");
   assert.equal(client.status, CONNECTION_STATUS.CONNECTING);
   assert.equal(states[0].room.revision, 0);

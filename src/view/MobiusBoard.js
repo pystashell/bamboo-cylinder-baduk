@@ -3,12 +3,19 @@ import * as THREE from "three";
 import { TorusBoard } from "./TorusBoard.js";
 import { translateText } from "../i18n.js";
 import {
+  createAnalysisVariationMarker,
+  placeAnalysisVariationMarker,
+} from "./analysisVariationMarkers.js";
+import {
   MOBIUS_TAU,
   MobiusBoundaryCurve,
   MobiusColumnCurve,
   MobiusRowCurve,
   createMobiusSurfaceGeometry,
+  minimumMobiusNeighborDistance,
+  mobiusBoardLayout,
   mobiusGridFrame,
+  mobiusGridPointFromUv,
 } from "./mobiusGeometry.js";
 
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
@@ -54,18 +61,28 @@ export class MobiusBoard extends TorusBoard {
     // Keep the standard circular embedding free of self-intersections. Grid
     // rows sit slightly inside the physical edge so stones on the boundary are
     // not clipped by the band.
-    this.surfaceHalfWidth = this.majorRadius * 0.7;
-    this.gridHalfWidth = this.surfaceHalfWidth * 0.88;
+    const layout = mobiusBoardLayout({
+      width: this.width,
+      height: this.height,
+      majorRadius: this.majorRadius,
+    });
+    this.surfaceHalfWidth = layout.surfaceHalfWidth;
+    this.gridHalfWidth = layout.gridHalfWidth;
     this.minorRadius = this.surfaceHalfWidth;
     this.mobiusRowSpacing =
       (this.gridHalfWidth * 2) / Math.max(1, this.height - 1);
     this.mobiusColumnSpacing = (this.majorRadius * MOBIUS_TAU) / this.width;
+    this.mobiusNeighborSpacing = minimumMobiusNeighborDistance({
+      width: this.width,
+      height: this.height,
+      majorRadius: this.majorRadius,
+      halfWidth: this.gridHalfWidth,
+    });
     this.mobiusStoneRadius = Math.max(
-      0.11,
+      0.07,
       Math.min(
         0.36,
-        this.mobiusRowSpacing * 0.4,
-        this.mobiusColumnSpacing * 0.34,
+        this.mobiusNeighborSpacing * 0.34,
       ),
     );
     this.mobiusStoneThickness = Math.max(0.035, this.mobiusStoneRadius * 0.34);
@@ -182,9 +199,9 @@ export class MobiusBoard extends TorusBoard {
       }
     }
 
-    // Picking works from the closest visible surface hit, then selects the
-    // nearest canonical grid point. This avoids ambiguous inverse parameters
-    // at the reversed seam and is bounded by the app's 30x30 board maximum.
+    // Keep canonical points as a fallback for renderers that do not expose
+    // intersection UVs. Normal picking uses UVs, which remain unambiguous even
+    // when the wider strip brings two parts of the band close together.
     this.canonicalPoints = [];
     for (let row = 0; row < this.height; row += 1) {
       for (let col = 0; col < this.width; col += 1) {
@@ -291,23 +308,25 @@ export class MobiusBoard extends TorusBoard {
   }
 
   addVariationMarker(row, col, entry = null, index = 0) {
+    if (
+      !Number.isInteger(row) || !Number.isInteger(col) ||
+      row < 0 || row >= this.height || col < 0 || col >= this.width
+    ) return;
     const radius = this.mobiusStoneRadius;
-    this.addPairedMarker(
-      row,
-      col,
-      this.mobiusStoneThickness * 1.22,
-      () => new THREE.RingGeometry(
-        radius * 0.42,
-        radius * (0.65 + Math.min(index, 4) * 0.025),
-        28,
-      ),
-      () =>
-        new THREE.MeshBasicMaterial({
-          color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
-          side: THREE.DoubleSide,
-          depthTest: true,
-        }),
-    );
+    const frame = this.frame(row, col);
+    for (const side of [-1, 1]) {
+      const marker = createAnalysisVariationMarker(entry, index, {
+        radius: radius * 0.72,
+      });
+      placeAnalysisVariationMarker(marker, {
+        position: frame.position,
+        normal: frame.normal,
+        up: frame.tangentV,
+        surfaceOffset: this.mobiusStoneThickness * 1.22,
+        side,
+      });
+      this.markersGroup.add(marker);
+    }
   }
 
   addReferenceMarker(row, col, occupied) {
@@ -339,6 +358,15 @@ export class MobiusBoard extends TorusBoard {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hit = this.raycaster.intersectObject(this.surface, false)[0];
     if (!hit || !this.canonicalPoints?.length) return null;
+
+    if (hit.uv) {
+      return mobiusGridPointFromUv({
+        u: hit.uv.x,
+        v: hit.uv.y,
+        width: this.width,
+        height: this.height,
+      });
+    }
 
     const localPoint = this.boardGroup.worldToLocal(hit.point.clone());
     let closest = null;

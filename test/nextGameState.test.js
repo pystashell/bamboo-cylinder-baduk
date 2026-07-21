@@ -176,6 +176,28 @@ test("only an authoritative empty new online round dismisses the setup preview",
   }).exitSetup, false);
 });
 
+test("an accepted setup-first invitation dismisses the initial preview", () => {
+  const setup = {
+    revision: 2,
+    positionToken: "setup-position",
+    moveCount: 0,
+    match: { roundId: 0, status: "invited" },
+    game: { phase: "play" },
+    timeControl: null,
+  };
+  const accepted = {
+    ...setup,
+    revision: 3,
+    positionToken: "round-one-position",
+    match: { roundId: 1, status: "playing" },
+  };
+  assert.equal(onlineNextGameTransition({
+    previousRoom: setup,
+    nextRoom: accepted,
+    setupActive: true,
+  }).exitSetup, true);
+});
+
 test("real room timeout snapshots keep their token until the server creates a new game", () => {
   const room = RoomEngine.create({
     code: "NXT234",

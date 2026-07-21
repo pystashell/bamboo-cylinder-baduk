@@ -471,7 +471,49 @@ export class BadukRoom {
   }
 
   async persist() {
-    if (this.engine) await this.ctx.storage.put(STORAGE_KEY, this.engine.serialize());
+    if (!this.engine) return;
+    await this.ctx.storage.put(STORAGE_KEY, this.engine.serialize());
+    const publishing = this.publishRoomIndexSnapshot();
+    if (typeof this.ctx.waitUntil === "function") this.ctx.waitUntil(publishing);
+    else void publishing;
+  }
+
+  async publishRoomIndexSnapshot() {
+    // A room is the source of truth. The optional index receives a one-way
+    // public snapshot and derives its own disposable directory entry. Nothing
+    // in this object ever reads from the index.
+    if (!this.engine || !this.env?.BADUK_ROOM_INDEX) return;
+    try {
+      const index = this.env.BADUK_ROOM_INDEX.getByName("global");
+      const response = await index.fetch(
+        new Request("https://room-index.internal/internal/upsert", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.engine.snapshot()),
+        }),
+      );
+      if (!response.ok) {
+        console.error("Unable to publish room to optional index", response.status);
+      }
+    } catch (error) {
+      console.error("Unable to publish room to optional index", error);
+    }
+  }
+
+  async removeRoomIndexEntry(code) {
+    if (!this.env?.BADUK_ROOM_INDEX || !code) return;
+    try {
+      const index = this.env.BADUK_ROOM_INDEX.getByName("global");
+      await index.fetch(
+        new Request("https://room-index.internal/internal/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        }),
+      );
+    } catch (error) {
+      console.error("Unable to remove room from optional index", error);
+    }
   }
 
   async scheduleAlarm() {
@@ -492,6 +534,7 @@ export class BadukRoom {
   async retireRoom() {
     if (this.retiring) return;
     this.retiring = true;
+    const roomCode = this.engine?.state?.code ?? null;
     this.engine = null;
     for (const socket of this.ctx.getWebSockets()) {
       this.sendError(socket, {
@@ -505,6 +548,9 @@ export class BadukRoom {
         await this.ctx.storage.deleteAlarm();
       }
       await this.ctx.storage.deleteAll();
+      const removal = this.removeRoomIndexEntry(roomCode);
+      if (typeof this.ctx.waitUntil === "function") this.ctx.waitUntil(removal);
+      else void removal;
     } finally {
       this.retiring = false;
     }

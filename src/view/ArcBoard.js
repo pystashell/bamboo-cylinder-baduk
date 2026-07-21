@@ -5,6 +5,7 @@ import {
   preventBoardContextMenu,
 } from "./pointerGestures.js";
 import { translateText } from "../i18n.js";
+import { createAnalysisVariationMarker } from "./analysisVariationMarkers.js";
 import {
   createTerritoryMarkerLayer,
   disposeTerritoryMarkerLayer,
@@ -761,19 +762,12 @@ export class ArcBoard {
       !Number.isInteger(row) || !Number.isInteger(col) ||
       row < 0 || row >= this.height || col < 0 || col >= this.width
     ) return;
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.105, 0.145 + Math.min(index, 4) * 0.006, 28),
-      new THREE.MeshBasicMaterial({
-        color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
-        side: THREE.DoubleSide,
-        depthTest: true,
-      }),
-    );
-    ring.userData.row = row;
-    ring.userData.col = col;
-    ring.userData.surfaceOffset = 0.286;
-    this.positionMarker(ring, row, col);
-    this.markersGroup.add(ring);
+    const marker = createAnalysisVariationMarker(entry, index, { radius: 0.19 });
+    marker.userData.row = row;
+    marker.userData.col = col;
+    marker.userData.surfaceOffset = 0.286;
+    this.positionMarker(marker, row, col);
+    this.markersGroup.add(marker);
   }
 
   addReferenceMarker(row, col, occupied) {

@@ -53,8 +53,8 @@ function safeUrl(value, baseUrl) {
 }
 
 /**
- * Parse `?room=ABC123`, `#room=ABC123`, or `/room/ABC123` share links.
- * A plain room code is accepted as well.
+ * Parse canonical `/online/ABC123` links as well as the legacy query, hash,
+ * `/room/ABC123`, and `/join/ABC123` forms. A plain room code is accepted too.
  */
 export function parseShareUrl(value, baseUrl = "http://localhost/") {
   const plainCode = normalizeRoomCode(value);
@@ -66,7 +66,7 @@ export function parseShareUrl(value, baseUrl = "http://localhost/") {
   if (!url) return { roomCode: "", name: "", role: "" };
 
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""));
-  const pathMatch = url.pathname.match(/\/(?:rooms?|join)\/([^/]+)\/?$/iu);
+  const pathMatch = url.pathname.match(/\/(?:online|rooms?|join)\/([^/]+)\/?$/iu);
   const roomCode = normalizeRoomCode(
     url.searchParams.get("room") ??
       url.searchParams.get("code") ??
@@ -87,6 +87,38 @@ export function parseShareUrl(value, baseUrl = "http://localhost/") {
   };
 }
 
+/**
+ * Resolve the four top-level app routes without performing any navigation.
+ * Unknown routes deliberately fall back to the standalone app so a typo can
+ * never make the hidden lobby a dependency of ordinary play.
+ */
+export function parseAppRoute(value, baseUrl = "http://localhost/") {
+  const url = safeUrl(String(value ?? ""), baseUrl);
+  if (!url) return { mode: "single", roomCode: "", role: "" };
+
+  const pathname = url.pathname.replace(/\/+$/u, "") || "/";
+  if (pathname === "/") return { mode: "root", roomCode: "", role: "" };
+  if (pathname.toLowerCase() === "/lobby") {
+    return { mode: "lobby", roomCode: "", role: "" };
+  }
+  if (pathname.toLowerCase() === "/single") {
+    return { mode: "single", roomCode: "", role: "" };
+  }
+
+  const onlineMatch = pathname.match(/^\/online\/([^/]+)$/iu);
+  const roomCode = normalizeRoomCode(onlineMatch?.[1] ?? "");
+  if (roomCode) {
+    const role = String(url.searchParams.get("role") ?? "").toLowerCase();
+    return {
+      mode: "online",
+      roomCode,
+      role: role === "spectator" ? "spectator" : "",
+    };
+  }
+
+  return { mode: "single", roomCode: "", role: "" };
+}
+
 export function buildShareUrl(roomCode, baseUrl = "http://localhost/") {
   const code = normalizeRoomCode(roomCode);
   if (!code) {
@@ -101,7 +133,8 @@ export function buildShareUrl(roomCode, baseUrl = "http://localhost/") {
       code: "INVALID_BASE_URL",
     });
   }
-  url.searchParams.set("room", code);
+  url.pathname = `/online/${encodeURIComponent(code)}`;
+  url.search = "";
   url.hash = "";
   return url.toString();
 }
@@ -338,6 +371,12 @@ export class RoomClient {
 
   get status() {
     return this.connectionStatus;
+  }
+
+  hasStoredSession(roomCode) {
+    const code = normalizeRoomCode(roomCode);
+    if (!code) return false;
+    return Boolean(this.tokenStore.get(code)?.token);
   }
 
   on(type, listener) {

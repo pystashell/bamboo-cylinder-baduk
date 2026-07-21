@@ -1,4 +1,5 @@
 import { BadukRoom } from "./BadukRoom.js";
+import { BadukLobby } from "./BadukLobby.js";
 import {
   BADUK_PROTOCOL_VERSION,
   isRecord,
@@ -7,7 +8,7 @@ import {
 } from "../src/multiplayer/protocol.js";
 import { hashRoomToken } from "../src/multiplayer/roomEngine.js";
 
-export { BadukRoom };
+export { BadukLobby, BadukRoom };
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_BODY_BYTES = 4 * 1024;
@@ -134,6 +135,10 @@ async function createRoom(request, env) {
           topology: body.topology,
           playerId,
           tokenHash,
+          // Online rooms always open in the reusable setup state. A round is
+          // created only after request_game (and, for a friend match, after
+          // the invited player accepts it).
+          startImmediately: false,
         }),
       }),
     );
@@ -185,6 +190,16 @@ async function joinRoom(request, env, roomCode) {
   );
 }
 
+async function listLobbyRooms(env) {
+  const stub = env.BADUK_ROOM_INDEX.getByName("global");
+  const result = await callRoom(
+    stub,
+    new Request("https://lobby.internal/internal/rooms", { method: "GET" }),
+  );
+  if (!result.ok) return result.response;
+  return jsonResponse({ rooms: result.payload.rooms ?? [] });
+}
+
 const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -194,6 +209,14 @@ const worker = {
           return new Response(null, { status: 405, headers: { Allow: "GET" } });
         }
         return jsonResponse({ ok: true, service: "bamboo-baduk" });
+      }
+
+      if (url.pathname === "/api/lobby") {
+        if (request.method !== "GET") {
+          return new Response(null, { status: 405, headers: { Allow: "GET" } });
+        }
+        if (!hasAllowedOrigin(request)) return jsonResponse({ error: "请求来源不允许。" }, 403);
+        return listLobbyRooms(env);
       }
 
       if (url.pathname === "/api/rooms") {

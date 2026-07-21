@@ -6,6 +6,47 @@
  * state can reuse the same translator without duplicating DOM-specific keys.
  */
 export const ENGLISH_STATIC = Object.freeze({
+  "奇异棋盘在线大厅": "Unusual Board Online Lobby",
+  "创建竹筒、甜甜圈或莫比乌斯棋局；好友、人机、AI 自对弈和同机双人都可实时同步并开放观战。":
+    "Create Cylinder, Torus, or Möbius games. Friend matches, human vs AI, AI vs AI, and same-device games can all sync live and allow spectators.",
+  "输入房间号": "Enter room code",
+  "公开房间": "Public rooms",
+  "选择一盘棋": "Choose a game",
+  "刷新": "Refresh",
+  "房间状态": "Room status",
+  "全部": "All",
+  "等待加入": "Waiting",
+  "正在进行": "Playing",
+  "已结束": "Finished",
+  "全部形状": "All shapes",
+  "棋盘尺寸": "Board size",
+  "全部尺寸": "All sizes",
+  "自定义长宽": "Custom dimensions",
+  "全部方式": "All modes",
+  "好友对战": "Friend match",
+  "人机对战": "Human vs AI",
+  "同机双人": "Same-device two-player",
+  "正在读取公开房间…": "Loading public rooms…",
+  "暂时没有符合条件的房间": "No matching rooms right now",
+  "可以创建一盘新的异形棋局，第一位对手或观众很快就能加入。":
+    "Create a new unusual-board game and the first opponent or spectator can join shortly.",
+  "对局邀请": "Game invitation",
+  "等待回应": "Waiting for response",
+  "接受并开始": "Accept and start",
+  "取消邀请": "Cancel invitation",
+  "在线对局方式": "Online game mode",
+  "棋局会同步并可供观战": "The game will sync live and allow spectators",
+  "双方控制方式": "Side controllers",
+  "好友需要接受邀请；其他模式由本浏览器控制":
+    "A friend must accept the invitation; other modes are controlled by this browser",
+  "我和 AI": "Me vs AI",
+  "AI 对 AI": "AI vs AI",
+  "浏览器 AI": "Browser AI",
+  "b18 更强，但下载和显存占用明显更高":
+    "b18 is stronger but has a much larger download and VRAM footprint",
+  "b10 · 快速": "b10 · Fast",
+  "b18 · 增强（高耗资源）": "b18 · Enhanced (resource intensive)",
+  "终局后的操作": "Post-game actions",
   "19 × 19 · 竹筒": "19 × 19 · Cylinder",
   "◇ 点击棋点，只在本页建立分析分支":
     "◇ Select a point to create a local analysis branch",

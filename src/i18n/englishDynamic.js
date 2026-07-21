@@ -34,6 +34,83 @@ export const ENGLISH_DYNAMIC = Object.freeze({
   "自选点": "Selected point",
   "选": "Pick",
   "浏览器": "browser",
+  "等待设置": "Waiting for setup",
+  "等待接受": "Waiting for acceptance",
+  "正在进行": "In progress",
+  "已经结束": "Finished",
+  "好友对战": "Friend match",
+  "人机对战": "Human vs AI",
+  "同机双人": "Same-device two-player",
+  "刚刚更新": "updated just now",
+  "计时": "Timed",
+  "返回房间": "Return to room",
+  "观战": "Watch",
+  "正在读取公开房间…": "Loading public rooms…",
+  "暂时无法读取在线大厅。": "The online lobby is temporarily unavailable.",
+  "好友对局": "Friend match",
+  "在线人机": "Online human vs AI",
+  "在线 AI 对弈": "Online AI vs AI",
+  "在线同机双人": "Online same-device two-player",
+  "等待被邀请方回应。": "Waiting for the invited player to respond.",
+  "设置并发起一盘新棋": "Configure and start a new game",
+  "对局邀请等待回应": "Game invitation awaiting response",
+  "KataGo 在浏览器运行，朋友可以观战":
+    "KataGo runs in the browser while friends spectate",
+  "房间对局已同步给所有成员": "This room game is synced to everyone",
+  "房间已经建立。请在棋盘设置中确认配置并发起对局。":
+    "The room is ready. Confirm the configuration under Board Settings and start a game.",
+  "房主正在准备下一盘棋；你可以继续聊天或等待邀请。":
+    "The host is preparing the next game; you can keep chatting or wait for an invitation.",
+  "邀请已发出，等待对方接受或拒绝。":
+    "The invitation was sent. Waiting for the other player to accept or decline.",
+  "房主发来了对局邀请，请接受或拒绝。":
+    "The host sent a game invitation. Accept or decline it.",
+  "这盘棋正在等待受邀玩家回应。":
+    "This game is waiting for the invited player to respond.",
+  "房主邀请你开始对局": "The host invites you to start",
+  "等待受邀玩家回应": "Waiting for the invited player",
+  "使用当前设置发起对局邀请": "Send invitation with these settings",
+  "使用当前设置开始在线对局": "Start online game with these settings",
+  "当前邀请仍在等待回应；请先取消邀请再修改。":
+    "The current invitation is still awaiting a response. Cancel it before making changes.",
+  "当前对局尚未结束，不能发起新棋。":
+    "The current game is not over, so a new game cannot be started.",
+  "正在发送对局邀请…": "Sending game invitation…",
+  "正在开始在线对局…": "Starting online game…",
+  "对局邀请已发出，等待对方接受。所有设置会保留在当前房间。":
+    "The game invitation was sent. Waiting for the other player to accept; all settings will remain in this room.",
+  "下一局设置": "Next-game settings",
+  "AI · 黑方": "AI · Black",
+  "当前浏览器不支持后台 AI 复盘。":
+    "This browser does not support background AI replay review.",
+  "当前浏览器不支持后台 AI 局势分析。":
+    "This browser does not support background AI position analysis.",
+  "当前浏览器没有检测到 WebGPU，无法使用 b18，请选择 b10。":
+    "WebGPU was not detected in this browser. Choose b10 instead of b18.",
+  "当前搜索没有返回更长的变化。": "This search did not return a longer variation.",
+  "房间正在连接或同步，请稍等一下。":
+    "The room is connecting or syncing. Please wait.",
+  "你还没有可以撤回的棋步。": "You do not have a move to undo yet.",
+  "棋局已经更新；上一局面的分析已停止，可重新分析最新局面。":
+    "The game changed. Analysis of the previous position stopped; you can analyze the latest position again.",
+  "请等待白方真人加入，或由房主接入 AI。":
+    "Wait for a human White player to join, or let the host attach an AI.",
+  "请先结束当前对局并返回房间，再邀请下一局。":
+    "Finish the current game and return to the room before inviting the next one.",
+  "现在轮到在线 AI 思考；棋步会由房主浏览器提交并由服务器验证。":
+    "The online AI is thinking. Its move will be submitted by the host browser and validated by the server.",
+  "在线对局尚未结束；为保证公平，比赛双方暂不能使用 AI 复盘。":
+    "The online game is still in progress. For fair play, both players cannot use AI replay review yet.",
+  "这份棋谱里没有可以分析的行棋局面。":
+    "This record has no played position available for analysis.",
+  "这是观战入口；填写名字后请选择“进入观战”。":
+    "This is the spectator entrance. Enter your name, then choose Enter as spectator.",
+  "这是棋谱当前末尾，没有实战下一手可比较。":
+    "This is the current end of the record, so there is no next played move to compare.",
+  "KataGo 正在房主浏览器中思考；服务器会验证并同步棋步。":
+    "KataGo is thinking in the host browser; the server will validate and sync the move.",
+  "b18 首次需要下载约 93.4 MB，并会占用数百 MB 内存与显存、增加耗电和发热。仅建议桌面端 WebGPU。确定使用吗？":
+    "b18 initially downloads about 93.4 MB and uses hundreds of MB of RAM/VRAM, increasing power use and heat. It is recommended only for desktop WebGPU. Use it anyway?",
   "单机模式": "Local game",
   "在线房间": "Online room",
   "在线人机房间": "Online AI room",
@@ -473,6 +550,29 @@ export const ENGLISH_PATTERNS = Object.freeze([
     },
   },
   {
+    pattern: /^(\d+) × (\d+) · (竹筒|甜甜圈|莫比乌斯) · (中国规则|日本规则)$/u,
+    replace: (_, width, height, topology, rule) =>
+      `${width} × ${height} · ${capturedTerm(topology)} · ${capturedTerm(rule)}`,
+  },
+  {
+    pattern: /^(\d+) 分钟前$/u,
+    replace: (_, minutes) => `${minutes} minute${minutes === "1" ? "" : "s"} ago`,
+  },
+  {
+    pattern: /^(\d+) 小时前$/u,
+    replace: (_, hours) => `${hours} hour${hours === "1" ? "" : "s"} ago`,
+  },
+  { pattern: /^房间 ([A-Z0-9]{6})$/u, replace: "Room $1" },
+  { pattern: /^第 (\d+) 局$/u, replace: "Game $1" },
+  {
+    pattern: /^(\d+) 人观战 · (刚刚更新|\d+ 分钟前|\d+ 小时前)$/u,
+    replace: (_, count, activity) => `${count} spectator${count === "1" ? "" : "s"} · ${capturedPhrase(activity)}`,
+  },
+  {
+    pattern: /^共 (\d+) 个公开房间 · 自动刷新$/u,
+    replace: (_, count) => `${count} public room${count === "1" ? "" : "s"} · auto-refreshing`,
+  },
+  {
     pattern: /^你将以(.+)认输，对方立即获胜；不需要对方确认，此操作不能撤销。$/u,
     replace: (_, loser) => `You will resign as ${capturedTerm(loser)}. Your opponent wins immediately; no approval is required and this cannot be undone.`,
   },
@@ -776,6 +876,8 @@ export const ENGLISH_PATTERNS = Object.freeze([
   { pattern: /^发送表情包：(.+)$/u, replace: "Send sticker: $1" },
   { pattern: /^已在棋盘标出 📍 (.+)。$/u, replace: "Marked 📍 $1 on the board." },
   { pattern: /^已引用 📍 (.+)；发送后双方都能点击定位。$/u, replace: "Referenced 📍 $1. Both players can open it after you send." },
+  { pattern: /^(.+) · 同机 · 在线$/u, replace: "$1 · same device · online" },
+  { pattern: /^(.+) · 同机 · 暂时离线$/u, replace: "$1 · same device · temporarily offline" },
   { pattern: /^(.+) · 在线$/u, replace: "$1 · online" },
   { pattern: /^(.+) · 暂时离线$/u, replace: "$1 · temporarily offline" },
   { pattern: /^(.+) · AI · 房主页面在线$/u, replace: "$1 · AI · host page online" },

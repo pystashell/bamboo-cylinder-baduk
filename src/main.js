@@ -58,7 +58,13 @@ import { FlatBoard } from "./view/FlatBoard.js";
 import { ArcBoard } from "./view/ArcBoard.js";
 import { TorusBoard } from "./view/TorusBoard.js";
 import { MobiusBoard } from "./view/MobiusBoard.js";
-import { RoomClient, CONNECTION_STATUS } from "./multiplayer/roomClient.js";
+import {
+  RoomClient,
+  CONNECTION_STATUS,
+  buildShareUrl,
+  parseAppRoute,
+  parseShareUrl,
+} from "./multiplayer/roomClient.js";
 import {
   CHAT_STICKERS,
   chatSticker,
@@ -82,9 +88,11 @@ import {
   MATCH_TRANSPORT_LOCAL,
   MATCH_TRANSPORT_ONLINE,
   automatedSeat,
+  controllerOperatorsFromRoom,
   controllersFromRoom,
   createMatchSession,
   isHumanOnlineMatch,
+  isSameBrowserHumanOnlineMatch,
   routeMatchAction,
   shouldProtectOnlineAITurn,
 } from "./game/matchSession.js";
@@ -106,6 +114,19 @@ initializeI18n();
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
+  lobbyScreen: $("#lobby-screen"),
+  gameScreen: $("#game-screen"),
+  headerTopologySwitch: $(".topology-switch"),
+  lobbyCreateRoom: $("#lobby-create-room"),
+  lobbyJoinRoom: $("#lobby-join-room"),
+  lobbyRefresh: $("#lobby-refresh"),
+  lobbyStatusButtons: [...document.querySelectorAll("[data-lobby-status]")],
+  lobbyTopologyFilter: $("#lobby-topology-filter"),
+  lobbySizeFilter: $("#lobby-size-filter"),
+  lobbyModeFilter: $("#lobby-mode-filter"),
+  lobbyStatus: $("#lobby-status"),
+  lobbyRoomList: $("#lobby-room-list"),
+  lobbyEmpty: $("#lobby-empty"),
   boardStage: $(".board-stage"),
   viewSwitch: $(".view-switch"),
   scene: $("#scene"),
@@ -182,6 +203,10 @@ const elements = {
   nextGameContext: $("#next-game-context"),
   nextGameHint: $("#next-game-hint"),
   confirmNextGame: $("#confirm-next-game"),
+  onlineMatchOptions: $("#online-match-options"),
+  onlineMatchMode: $("#online-match-mode"),
+  onlineMatchAiModelField: $("#online-match-ai-model-field"),
+  onlineMatchAiModel: $("#online-match-ai-model"),
   timeControlPreset: $("#time-control-preset"),
   customTimeFields: $("#custom-time-fields"),
   mainTimeMinutes: $("#main-time-minutes"),
@@ -237,6 +262,12 @@ const elements = {
   blackSeat: $("#black-seat"),
   whiteSeat: $("#white-seat"),
   roomHint: $("#room-hint"),
+  gameInvitationPanel: $("#game-invitation-panel"),
+  gameInvitationTitle: $("#game-invitation-title"),
+  gameInvitationSummary: $("#game-invitation-summary"),
+  acceptGameInvitation: $("#accept-game-invitation"),
+  declineGameInvitation: $("#decline-game-invitation"),
+  cancelGameInvitation: $("#cancel-game-invitation"),
   attachRoomAi: $("#attach-room-ai"),
   detachRoomAi: $("#detach-room-ai"),
   chatPanel: $("#chat-panel"),
@@ -321,8 +352,23 @@ const MATCH_LIFECYCLE_LOBBY = "lobby";
 const MATCH_LIFECYCLE_WAITING = "waiting";
 const MATCH_LIFECYCLE_PLAYING = "playing";
 const MATCH_LIFECYCLE_FINISHED = "finished";
+const ONLINE_MATCH_SETUP = "setup";
+const ONLINE_MATCH_INVITED = "invited";
+const ONLINE_MATCH_PLAYING = "playing";
+const ONLINE_MATCH_FINISHED = "finished";
+const ONLINE_MODE_FRIEND = "friend";
+const ONLINE_MODE_HUMAN_AI = "human-ai";
+const ONLINE_MODE_AI_AI = "ai-ai";
+const ONLINE_MODE_LOCAL = "local";
 let matchLifecycle = MATCH_LIFECYCLE_LOBBY;
 let lobbyPreviewFrame = null;
+let lobbyRefreshTimer = null;
+let lobbyRefreshController = null;
+let lobbyRooms = [];
+let lobbyStatusFilter = "all";
+let lobbyLoading = false;
+let lobbyModulesPromise = null;
+let appRouteMode = "single";
 const autoRotateByView = { arc: false, "3d": false };
 let moveCount = 0;
 let pendingWidth = 19;
@@ -677,7 +723,14 @@ function formatClockDuration(milliseconds) {
 }
 
 function clockDisplayName(color) {
-  if (hasOnlineSession()) return roomSeat(color)?.name ?? translateText(colorName(color));
+  if (hasOnlineSession()) {
+    const declared = onlineController(color);
+    const operator = onlineRoom?.players?.find((player) => player.id === declared?.operatorId);
+    if (declared?.kind === MATCH_CONTROLLER_AI) {
+      return `KataGo ${declared.modelId ?? DEFAULT_AI_MODEL_ID}`;
+    }
+    return operator?.name ?? roomSeat(color)?.name ?? translateText(colorName(color));
+  }
   if (isAIMode()) {
     if (isAIvsAI()) return `${getAIModel(aiGameModelId).shortLabel} AI`;
     return color === aiHumanColor ? translateText("你") : getAIModel(aiGameModelId).shortLabel;
@@ -2021,6 +2074,42 @@ function hasOnlineSession() {
   return Boolean(roomClient.session && roomClient.roomCode);
 }
 
+function onlineMatchStatus(room = onlineRoom) {
+  const status = room?.match?.status;
+  if ([
+    ONLINE_MATCH_SETUP,
+    ONLINE_MATCH_INVITED,
+    ONLINE_MATCH_PLAYING,
+    ONLINE_MATCH_FINISHED,
+  ].includes(status)) return status;
+  if (room?.game?.phase === PHASE_FINISHED || room?.timeControl?.outcome) {
+    return ONLINE_MATCH_FINISHED;
+  }
+  return room?.players?.some((player) => player.color === BLACK) &&
+    room?.players?.some((player) => player.color === WHITE)
+    ? ONLINE_MATCH_PLAYING
+    : ONLINE_MATCH_SETUP;
+}
+
+function onlineController(color, room = onlineRoom) {
+  const value = room?.match?.controllers?.[color];
+  if (
+    value &&
+    [MATCH_CONTROLLER_HUMAN, MATCH_CONTROLLER_AI].includes(value.kind)
+  ) return value;
+  const legacySeat = room?.players?.find((player) => player.color === color);
+  if (!legacySeat) return null;
+  return {
+    kind: automatedSeat(room, color) ? MATCH_CONTROLLER_AI : MATCH_CONTROLLER_HUMAN,
+    operatorId: legacySeat.controllerId ?? legacySeat.id ?? null,
+    ...(legacySeat.modelId ? { modelId: legacySeat.modelId } : {}),
+  };
+}
+
+function onlineControllersReady(room = onlineRoom) {
+  return [BLACK, WHITE].every((color) => Boolean(onlineController(color, room)?.operatorId));
+}
+
 function isLocalLobby() {
   return !hasOnlineSession() && matchLifecycle === MATCH_LIFECYCLE_LOBBY;
 }
@@ -2056,11 +2145,20 @@ function hasStartedMatch() {
 function syncLifecycleFromCurrentGame() {
   if (isNextGameSetup()) return;
   if (matchLifecycle === MATCH_LIFECYCLE_LOBBY && !hasOnlineSession()) return;
+  if (hasOnlineSession() && onlineRoom?.match) {
+    const status = onlineMatchStatus();
+    matchLifecycle = status === ONLINE_MATCH_PLAYING
+      ? MATCH_LIFECYCLE_PLAYING
+      : status === ONLINE_MATCH_FINISHED
+        ? MATCH_LIFECYCLE_FINISHED
+        : MATCH_LIFECYCLE_WAITING;
+    return;
+  }
   if (game?.phase === PHASE_FINISHED || currentTimeoutOutcome()) {
     matchLifecycle = MATCH_LIFECYCLE_FINISHED;
     return;
   }
-  if (hasOnlineSession() && !(roomSeat(BLACK) && roomSeat(WHITE))) {
+  if (hasOnlineSession() && !onlineControllersReady()) {
     matchLifecycle = MATCH_LIFECYCLE_WAITING;
     return;
   }
@@ -2086,7 +2184,25 @@ function currentControllersByColor() {
 }
 
 function onlineAISeat(color = null) {
-  return automatedSeat(onlineRoom, color);
+  const colors = color ? [color] : [BLACK, WHITE];
+  for (const candidate of colors) {
+    const controller = onlineController(candidate);
+    if (controller?.kind !== MATCH_CONTROLLER_AI) continue;
+    const operator = onlineRoom?.players?.find(
+      (player) => player.id === controller.operatorId,
+    );
+    return {
+      id: `controller:${candidate}`,
+      name: `KataGo ${controller.modelId ?? DEFAULT_AI_MODEL_ID} AI`,
+      role: "ai",
+      color: candidate,
+      automated: true,
+      modelId: controller.modelId ?? DEFAULT_AI_MODEL_ID,
+      controllerId: controller.operatorId,
+      online: operator?.online !== false,
+    };
+  }
+  return null;
 }
 
 function isOnlineAIMatch() {
@@ -2094,27 +2210,29 @@ function isOnlineAIMatch() {
 }
 
 function isOnlineAIController() {
-  const seat = onlineAISeat();
   const identity = currentIdentity();
   const identityId = identity.playerId ?? identity.id;
-  return Boolean(
-    seat &&
-      isOnlineHost() &&
-      identityId &&
-      (!seat.controllerId || seat.controllerId === identityId),
-  );
+  return Boolean(identityId && [BLACK, WHITE].some((color) => {
+    const controller = onlineController(color);
+    return controller?.kind === MATCH_CONTROLLER_AI &&
+      controller.operatorId === identityId;
+  }));
 }
 
 function currentMatchSession() {
   const online = hasOnlineSession();
   const identity = online ? currentIdentity() : {};
   const controllers = currentControllersByColor();
+  const controllerOperators = online
+    ? controllerOperatorsFromRoom(onlineRoom)
+    : { [BLACK]: null, [WHITE]: null };
   const onlineReady = online && onlineStateSynchronized &&
     onlineRoom?.code === roomClient.roomCode && Boolean(onlineRoom?.game);
   const localUndoAvailable = isAIMode() ? canUndoAIChoice() : Boolean(game?.canUndo?.());
   return createMatchSession({
     transport: online ? MATCH_TRANSPORT_ONLINE : MATCH_TRANSPORT_LOCAL,
     controllerByColor: controllers,
+    controllerOperatorByColor: controllerOperators,
     identity,
     room: onlineRoom,
     hasGame: hasMatchGame(),
@@ -2125,7 +2243,7 @@ function currentMatchSession() {
     roomReady: onlineReady,
     busy: onlineBusy,
     commandPending: onlineCommandPending,
-    bothSeats: online ? Boolean(roomSeat(BLACK) && roomSeat(WHITE)) : true,
+    bothSeats: online ? onlineControllersReady() : true,
     whiteSeat: online ? roomSeat(WHITE) : null,
     undoAvailable: online ? onlineRoom?.undoAvailable === true : localUndoAvailable,
     undoRequest: online ? currentUndoRequest() : null,
@@ -2605,7 +2723,14 @@ function isOnlineHost() {
 }
 
 function isOnlineTurn() {
-  return isOnlinePlayer() && currentIdentity().color === game.currentPlayer;
+  if (!isOnlinePlayer()) return false;
+  const identity = currentIdentity();
+  const identityId = identity.playerId ?? identity.id;
+  const controller = onlineController(game.currentPlayer);
+  return Boolean(
+    controller?.kind === MATCH_CONTROLLER_HUMAN &&
+    controller.operatorId === identityId,
+  );
 }
 
 function currentUndoRequest() {
@@ -2653,11 +2778,217 @@ function hydratePublicGame(state) {
   return hydrated;
 }
 
+function onlineRoomPath(code, role = "") {
+  const url = new URL(buildShareUrl(code, window.location.href));
+  if (role === "spectator") url.searchParams.set("role", role);
+  return `${url.pathname}${url.search}`;
+}
+
+function replaceAppPath(path) {
+  window.history.replaceState(null, "", new URL(path, window.location.origin));
+}
+
+function navigateAppPath(path) {
+  window.location.assign(new URL(path, window.location.origin));
+}
+
+function loadLobbyModules() {
+  if (!lobbyModulesPromise) {
+    lobbyModulesPromise = Promise.all([
+      import("./multiplayer/lobby.js"),
+      import("./multiplayer/lobbyClient.js"),
+    ]).then(([lobby, client]) => ({ ...lobby, ...client }));
+  }
+  return lobbyModulesPromise;
+}
+
+function lobbyTopologyLabel(topology) {
+  return topology === TOPOLOGY_TORUS
+    ? "甜甜圈"
+    : topology === TOPOLOGY_MOBIUS
+      ? "莫比乌斯"
+      : "竹筒";
+}
+
+function lobbyStatusLabel(status) {
+  return {
+    setup: "等待设置",
+    invited: "等待接受",
+    playing: "正在进行",
+    finished: "已经结束",
+  }[status] ?? "房间";
+}
+
+function lobbyModeLabel(mode) {
+  return {
+    friend: "好友对战",
+    "human-ai": "人机对战",
+    "ai-ai": "AI 自对弈",
+    local: "同机双人",
+  }[mode] ?? "在线对局";
+}
+
+function lobbyUpdatedLabel(updatedAt) {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - updatedAt) / 1_000));
+  if (elapsedSeconds < 60) return "刚刚更新";
+  if (elapsedSeconds < 3_600) return `${Math.floor(elapsedSeconds / 60)} 分钟前`;
+  return `${Math.floor(elapsedSeconds / 3_600)} 小时前`;
+}
+
+function appendLobbyMetadata(container, text) {
+  const item = document.createElement("span");
+  item.textContent = text;
+  container.append(item);
+}
+
+function createLobbyRoomCard(room) {
+  const card = document.createElement("article");
+  card.className = "lobby-room-card";
+  card.dataset.roomCode = room.code;
+
+  const header = document.createElement("div");
+  header.className = "lobby-room-card-header";
+  const title = document.createElement("strong");
+  title.textContent = `房间 ${room.code}`;
+  const status = document.createElement("span");
+  status.className = `lobby-room-status-badge ${room.status}`;
+  status.textContent = lobbyStatusLabel(room.status);
+  header.append(title, status);
+
+  const metadata = document.createElement("div");
+  metadata.className = "lobby-room-meta";
+  appendLobbyMetadata(metadata, `${room.width} × ${room.height}`);
+  appendLobbyMetadata(metadata, lobbyTopologyLabel(room.topology));
+  appendLobbyMetadata(metadata, lobbyModeLabel(room.mode));
+  if (room.timed) appendLobbyMetadata(metadata, "计时");
+  if (room.roundNumber > 0) appendLobbyMetadata(metadata, `第 ${room.roundNumber} 局`);
+
+  const players = document.createElement("div");
+  players.className = "lobby-room-players";
+  const black = room.players?.find((player) => player.color === BLACK)?.name || "等待黑方";
+  const white = room.players?.find((player) => player.color === WHITE)?.name || "等待白方";
+  const blackName = document.createElement("span");
+  blackName.textContent = black;
+  const versus = document.createElement("span");
+  versus.className = "versus";
+  versus.textContent = "VS";
+  const whiteName = document.createElement("span");
+  whiteName.textContent = white;
+  players.append(blackName, versus, whiteName);
+
+  const footer = document.createElement("div");
+  footer.className = "lobby-room-card-footer";
+  const activity = document.createElement("small");
+  activity.textContent = `${room.spectatorCount || 0} 人观战 · ${lobbyUpdatedLabel(room.updatedAt)}`;
+  const actions = document.createElement("div");
+  actions.className = "room-card-actions";
+
+  const resumable = roomClient.hasStoredSession(room.code);
+  if (resumable || room.joinable) {
+    const join = document.createElement("button");
+    join.type = "button";
+    join.className = resumable ? "primary-button" : "secondary-button";
+    join.dataset.lobbyRoom = room.code;
+    join.dataset.lobbyRole = resumable ? "resume" : "player";
+    join.textContent = resumable ? "返回房间" : "加入对局";
+    actions.append(join);
+  }
+  if (!resumable && room.watchable) {
+    const watch = document.createElement("button");
+    watch.type = "button";
+    watch.className = "secondary-button";
+    watch.dataset.lobbyRoom = room.code;
+    watch.dataset.lobbyRole = "spectator";
+    watch.textContent = "观战";
+    actions.append(watch);
+  }
+
+  footer.append(activity, actions);
+  card.append(header, metadata, players, footer);
+  return card;
+}
+
+async function renderLobbyRooms() {
+  if (appRouteMode !== "lobby") return;
+  const { filterLobbyRooms } = await loadLobbyModules();
+  const filtered = filterLobbyRooms(lobbyRooms, {
+    status: lobbyStatusFilter,
+    topology: elements.lobbyTopologyFilter.value,
+    size: elements.lobbySizeFilter.value,
+    mode: elements.lobbyModeFilter.value,
+  });
+  elements.lobbyRoomList.replaceChildren(...filtered.map(createLobbyRoomCard));
+  elements.lobbyEmpty.hidden = filtered.length > 0;
+}
+
+async function refreshLobby({ announce = false } = {}) {
+  if (appRouteMode !== "lobby" || lobbyLoading) return;
+  lobbyLoading = true;
+  lobbyRefreshController?.abort();
+  lobbyRefreshController = new AbortController();
+  elements.lobbyRefresh.disabled = true;
+  elements.lobbyStatus.classList.remove("error");
+  if (announce || !lobbyRooms.length) elements.lobbyStatus.textContent = "正在读取公开房间…";
+  try {
+    const { fetchLobbyRooms } = await loadLobbyModules();
+    lobbyRooms = await fetchLobbyRooms({ signal: lobbyRefreshController.signal });
+    await renderLobbyRooms();
+    elements.lobbyStatus.textContent = `共 ${lobbyRooms.length} 个公开房间 · 自动刷新`;
+  } catch (error) {
+    if (error?.cause?.name === "AbortError") return;
+    elements.lobbyStatus.textContent = error?.message || "暂时无法读取在线大厅。";
+    elements.lobbyStatus.classList.add("error");
+    await renderLobbyRooms();
+  } finally {
+    lobbyLoading = false;
+    elements.lobbyRefresh.disabled = false;
+  }
+}
+
+function stopLobbyRefresh() {
+  if (lobbyRefreshTimer !== null) {
+    window.clearInterval(lobbyRefreshTimer);
+    lobbyRefreshTimer = null;
+  }
+  lobbyRefreshController?.abort();
+  lobbyRefreshController = null;
+  lobbyLoading = false;
+}
+
+function startLobbyRefresh() {
+  if (lobbyRefreshTimer !== null) return;
+  void refreshLobby({ announce: true });
+  lobbyRefreshTimer = window.setInterval(() => void refreshLobby(), 8_000);
+}
+
+function showAppScreen(mode) {
+  appRouteMode = mode === "lobby" ? "lobby" : mode === "online" ? "online" : "single";
+  const lobbyVisible = appRouteMode === "lobby";
+  elements.lobbyScreen.hidden = !lobbyVisible;
+  elements.gameScreen.hidden = lobbyVisible;
+  elements.headerTopologySwitch.hidden = lobbyVisible;
+  if (lobbyVisible) {
+    startLobbyRefresh();
+    return;
+  }
+  stopLobbyRefresh();
+  window.requestAnimationFrame(() => {
+    cylinderView?.resize?.();
+    torusView?.resize?.();
+    mobiusView?.resize?.();
+    flatView?.resize?.();
+    arcView?.resize?.();
+  });
+}
+
 function updateRoomUrl(code = "") {
-  const url = new URL(window.location.href);
-  if (code) url.searchParams.set("room", code);
-  else url.searchParams.delete("room");
-  window.history.replaceState(null, "", url);
+  if (code) {
+    replaceAppPath(onlineRoomPath(code));
+    showAppScreen("online");
+    return;
+  }
+  replaceAppPath("/single");
+  showAppScreen("single");
 }
 
 function setOnlineBusy(busy, action = "") {
@@ -2760,12 +3091,49 @@ function roomSeat(color) {
   return onlineRoom?.players?.find((player) => player.color === color) ?? null;
 }
 
+function onlineModeLabel(mode = onlineRoom?.match?.mode) {
+  return {
+    [ONLINE_MODE_FRIEND]: "好友对局",
+    [ONLINE_MODE_HUMAN_AI]: "在线人机",
+    [ONLINE_MODE_AI_AI]: "在线 AI 对弈",
+    [ONLINE_MODE_LOCAL]: "在线同机双人",
+  }[mode] ?? "在线房间";
+}
+
+function onlineControllerSeat(color) {
+  const controller = onlineController(color);
+  if (!controller) return { text: `等待${colorName(color)}`, online: false };
+  const operator = onlineRoom?.players?.find((player) => player.id === controller.operatorId);
+  if (controller.kind === MATCH_CONTROLLER_AI) {
+    return {
+      text: `KataGo ${controller.modelId ?? DEFAULT_AI_MODEL_ID} · AI`,
+      online: operator?.online !== false,
+    };
+  }
+  const sameDevice = onlineController(oppositeColor(color))?.operatorId === controller.operatorId;
+  return {
+    text: operator
+      ? `${operator.name}${sameDevice ? " · 同机" : ""}${operator.online ? " · 在线" : " · 暂时离线"}`
+      : `等待${colorName(color)}`,
+    online: Boolean(operator?.online),
+  };
+}
+
+function onlineInvitationSummary(request = onlineRoom?.match?.request) {
+  if (!request?.settings) return "等待被邀请方回应。";
+  const settings = request.settings;
+  return `${settings.width} × ${settings.height} · ${topologySurfaceName(settings.topology)} · ${
+    settings.scoringRule === "japanese" ? "日本规则" : "中国规则"
+  }`;
+}
+
 function updateRoomUI() {
   const active = hasOnlineSession();
   const aiMode = isAIMode();
   const lobby = isLocalLobby();
   const rematchSetup = isNextGameSetup();
-  const waiting = active && !hasStartedMatch();
+  const roomMatchStatus = active ? onlineMatchStatus() : null;
+  const waiting = active && [ONLINE_MATCH_SETUP, ONLINE_MATCH_INVITED].includes(roomMatchStatus);
   const match = currentMatchSession();
   const onlineAi = active ? onlineAISeat() : null;
   const reviewing = isReplaying();
@@ -2779,7 +3147,7 @@ function updateRoomUI() {
   ).length;
   const scoreConfirmations = onlineRoom?.scoreConfirmations ?? [];
   const ownScoreConfirmed = scoreConfirmations.includes(identity.color);
-  const hasBothPlayers = Boolean(roomSeat(BLACK) && roomSeat(WHITE));
+  const hasBothPlayers = active ? onlineControllersReady() : true;
   const undoRequest = currentUndoRequest();
   const ownUndoRequest = isOwnUndoRequest(undoRequest);
   const connecting = [
@@ -2810,6 +3178,16 @@ function updateRoomUI() {
         ? "KataGo 同时控制黑白双方"
         : `你执${colorName(aiHumanColor).replace("方", "")} · AI 执${colorName(aiColor()).replace("方", "")}`
       : lobby ? "还没有发起对局" : "双方在同一台设备轮流落子";
+  if (active) {
+    elements.roomMode.textContent = onlineModeLabel();
+    elements.roomTitle.textContent = roomMatchStatus === ONLINE_MATCH_SETUP
+      ? "设置并发起一盘新棋"
+      : roomMatchStatus === ONLINE_MATCH_INVITED
+        ? "对局邀请等待回应"
+        : onlineAi
+          ? "KataGo 在浏览器运行，朋友可以观战"
+          : "房间对局已同步给所有成员";
+  }
   elements.offlineOpponentActions.hidden = !lobby || reviewing;
   elements.roomConnected.hidden = !active;
   elements.aiConnected.hidden = !aiMode;
@@ -2876,6 +3254,15 @@ function updateRoomUI() {
     elements.whiteSeat.parentElement.classList.toggle("connected-seat", Boolean(white?.online));
     elements.whiteSeat.parentElement.classList.toggle("disconnected-seat", Boolean(white && !white.online));
 
+    const blackControllerSeat = onlineControllerSeat(BLACK);
+    const whiteControllerSeat = onlineControllerSeat(WHITE);
+    elements.blackSeat.textContent = blackControllerSeat.text;
+    elements.whiteSeat.textContent = whiteControllerSeat.text;
+    elements.blackSeat.parentElement.classList.toggle("connected-seat", blackControllerSeat.online);
+    elements.blackSeat.parentElement.classList.toggle("disconnected-seat", !blackControllerSeat.online);
+    elements.whiteSeat.parentElement.classList.toggle("connected-seat", whiteControllerSeat.online);
+    elements.whiteSeat.parentElement.classList.toggle("disconnected-seat", !whiteControllerSeat.online);
+
     if (!connected) {
       if (roomClient.lastCloseCode === 4408) {
         elements.roomHint.textContent = "这个席位已在另一个窗口打开，本页已停止重连。";
@@ -2894,7 +3281,7 @@ function updateRoomUI() {
       elements.roomHint.textContent = isOnlineHost()
         ? "正在当前房间设置下一局；确认后会同步给所有玩家和观众。"
         : "黑方房主正在设置下一局；聊天和房间成员都会保留。";
-    } else if (!black || !white) {
+    } else if (!hasBothPlayers) {
       elements.roomHint.textContent = isOnlineHost()
         ? "把邀请链接发给朋友，或让 KataGo 接替空缺的白方座位。"
         : "等待白方加入后即可对弈。";
@@ -2921,12 +3308,50 @@ function updateRoomUI() {
           ? "KataGo 正在房主浏览器中思考；服务器会验证并同步棋步。"
           : `等待${colorName(game.currentPlayer)}落子。`;
     }
+    if (connected && onlineReady && roomMatchStatus === ONLINE_MATCH_SETUP) {
+      elements.roomHint.textContent = isOnlineHost()
+        ? "房间已经建立。请在棋盘设置中确认配置并发起对局。"
+        : "房主正在准备下一盘棋；你可以继续聊天或等待邀请。";
+    } else if (connected && onlineReady && roomMatchStatus === ONLINE_MATCH_INVITED) {
+      const request = onlineRoom?.match?.request;
+      const identityId = identity.playerId ?? identity.id;
+      elements.roomHint.textContent = request?.requestedBy === identityId
+        ? "邀请已发出，等待对方接受或拒绝。"
+        : request?.controllers?.white?.operatorId === identityId
+          ? "房主发来了对局邀请，请接受或拒绝。"
+          : "这盘棋正在等待受邀玩家回应。";
+    }
     if (spectatorCount > 0) {
       elements.roomHint.textContent += ` · ${spectatorCount} 人观战`;
     }
   }
 
   const onlineControlsAvailable = onlineReady && connected && !onlineBusy && !onlineCommandPending;
+  const gameRequest = active ? onlineRoom?.match?.request ?? null : null;
+  const identityId = identity.playerId ?? identity.id;
+  const ownsGameRequest = Boolean(gameRequest?.requestedBy === identityId);
+  const mayAnswerGameRequest = Boolean(
+    gameRequest?.controllers?.[WHITE]?.kind === MATCH_CONTROLLER_HUMAN &&
+    gameRequest.controllers[WHITE].operatorId === identityId &&
+    gameRequest.requestedBy !== identityId,
+  );
+  elements.gameInvitationPanel.hidden = !(
+    active && roomMatchStatus === ONLINE_MATCH_INVITED && gameRequest
+  );
+  if (gameRequest) {
+    elements.gameInvitationTitle.textContent = ownsGameRequest
+      ? "邀请已发出"
+      : mayAnswerGameRequest
+        ? "房主邀请你开始对局"
+        : "等待受邀玩家回应";
+    elements.gameInvitationSummary.textContent = onlineInvitationSummary(gameRequest);
+  }
+  elements.acceptGameInvitation.hidden = !mayAnswerGameRequest;
+  elements.declineGameInvitation.hidden = !mayAnswerGameRequest;
+  elements.cancelGameInvitation.hidden = !ownsGameRequest;
+  elements.acceptGameInvitation.disabled = !onlineControlsAvailable || !mayAnswerGameRequest;
+  elements.declineGameInvitation.disabled = !onlineControlsAvailable || !mayAnswerGameRequest;
+  elements.cancelGameInvitation.disabled = !onlineControlsAvailable || !ownsGameRequest;
   const canAbandonRoom = roomClient.connectionStatus === CONNECTION_STATUS.DISCONNECTED;
   const canDetachReplaced = roomClient.lastCloseCode === 4408;
   elements.copyRoomLink.disabled = reviewing || !onlineControlsAvailable;
@@ -2951,15 +3376,20 @@ function updateRoomUI() {
     "single",
     elements.directRematch.hidden || elements.adjustNextGame.hidden,
   );
+  const sameBrowserOnlineUndo = active && isSameBrowserHumanOnlineMatch(match);
   elements.undoButton.textContent = active
-    ? match.opponentController === MATCH_CONTROLLER_AI ? "直接悔棋" : "申请悔棋"
+    ? sameBrowserOnlineUndo
+      ? "悔棋"
+      : match.opponentController === MATCH_CONTROLLER_AI ? "直接悔棋" : "申请悔棋"
     : aiMode
       ? "直接悔棋"
       : "悔棋";
   elements.undoButton.title = active
-    ? match.opponentController === MATCH_CONTROLLER_AI
-      ? "直接撤回你和 AI 的上一轮落子，不需要 AI 同意"
-      : "需要对方同意后才会撤回上一手"
+    ? sameBrowserOnlineUndo
+      ? "直接撤回上一手"
+      : match.opponentController === MATCH_CONTROLLER_AI
+        ? "直接撤回你和 AI 的上一轮落子，不需要 AI 同意"
+        : "需要对方同意后才会撤回上一手"
     : aiMode
       ? "直接回到你上一次选择之前，不需要 AI 同意"
       : "直接撤回上一手";
@@ -2991,7 +3421,8 @@ function updateRoomUI() {
 
   const canChangeNextGameSettings = (
     lobby || (rematchSetup && (!active || isOnlineHost()))
-  ) && !undoRequest && !aiThinking;
+  ) && (!active || [ONLINE_MATCH_SETUP, ONLINE_MATCH_FINISHED].includes(roomMatchStatus)) &&
+    !undoRequest && !aiThinking;
   elements.customWidth.disabled = !canChangeNextGameSettings;
   elements.customHeight.disabled = !canChangeNextGameSettings;
   elements.scoringRule.disabled = !canChangeNextGameSettings;
@@ -3004,6 +3435,14 @@ function updateRoomUI() {
   for (const button of elements.topologyButtons) {
     button.disabled = !canChangeNextGameSettings;
   }
+  elements.onlineMatchOptions.hidden = !(active && rematchSetup);
+  elements.onlineMatchMode.disabled = !canChangeNextGameSettings;
+  const selectedOnlineMode = elements.onlineMatchMode.value;
+  const onlineModeUsesAI = [ONLINE_MODE_HUMAN_AI, ONLINE_MODE_AI_AI].includes(
+    selectedOnlineMode,
+  );
+  elements.onlineMatchAiModelField.hidden = !onlineModeUsesAI;
+  elements.onlineMatchAiModel.disabled = !canChangeNextGameSettings || !onlineModeUsesAI;
   if (elements.nextGameSetup) {
     elements.nextGameSetup.hidden = !rematchSetup;
     elements.nextGameContext.textContent = active ? "当前在线房间" : "沿用上一局";
@@ -3011,23 +3450,35 @@ function updateRoomUI() {
       ? "已沿用上一局设置；可以直接开始，也可以先调整棋盘。房间成员和聊天记录都会保留。"
       : "已沿用上一局设置；可以直接开始，也可以先调整棋盘。";
     elements.confirmNextGame.hidden = active && !isOnlineHost();
-    elements.confirmNextGame.disabled = !(
-      rematchSetup && match.capabilities.new_game && (!active || onlineControlsAvailable)
-    );
+    const canRequestOnlineGame = active && isOnlineHost() && rematchSetup &&
+      [ONLINE_MATCH_SETUP, ONLINE_MATCH_FINISHED].includes(roomMatchStatus) &&
+      onlineControlsAvailable;
+    elements.confirmNextGame.disabled = active
+      ? !canRequestOnlineGame
+      : !(rematchSetup && match.capabilities.new_game);
+    if (active) {
+      elements.confirmNextGame.textContent = selectedOnlineMode === ONLINE_MODE_FRIEND
+        ? "使用当前设置发起对局邀请"
+        : "使用当前设置开始在线对局";
+    }
   }
   elements.changeAiSettings.disabled = reviewing || finished || rematchSetup;
   elements.leaveAi.disabled = reviewing;
   const canAttachWaitingAI = Boolean(
-    waiting && active && onlineReady && connected && isOnlineHost() &&
+    !onlineRoom?.match && waiting && active && onlineReady && connected && isOnlineHost() &&
     game?.phase === PHASE_PLAY && !roomSeat(WHITE),
   );
-  const canAttachRoomAI = match.capabilities.attach_ai || canAttachWaitingAI;
+  const legacyRoomAiActions = !onlineRoom?.match;
+  const canAttachRoomAI = legacyRoomAiActions &&
+    (match.capabilities.attach_ai || canAttachWaitingAI);
   const roomAiActions = elements.attachRoomAi?.closest(".room-ai-actions");
-  if (roomAiActions) roomAiActions.hidden = !active || (!onlineAi && !canAttachRoomAI);
+  if (roomAiActions) {
+    roomAiActions.hidden = !legacyRoomAiActions || !active || (!onlineAi && !canAttachRoomAI);
+  }
   elements.attachRoomAi.textContent = onlineAi ? "调整 / 重试在线 AI" : "让 AI 接替白方";
   elements.attachRoomAi.hidden = !canAttachRoomAI;
   elements.attachRoomAi.disabled = reviewing || !canAttachRoomAI;
-  elements.detachRoomAi.hidden = !match.capabilities.detach_ai;
+  elements.detachRoomAi.hidden = !legacyRoomAiActions || !match.capabilities.detach_ai;
   elements.exportSgf.disabled = !hasStartedMatch() && !reviewing;
   elements.importSgf.disabled = false;
   syncChatUI();
@@ -3259,6 +3710,7 @@ function applyOnlineRoom(room) {
   }
 
   const previousRoom = onlineRoom;
+  const previousRequestRevision = previousRoom?.match?.request?.requestRevision ?? null;
   const previouslyDisplayedGame = liveDisplayedGame();
   const previousDimensions = {
     width: boardWidth(previouslyDisplayedGame),
@@ -3266,6 +3718,13 @@ function applyOnlineRoom(room) {
   };
   const previousTopology = previouslyDisplayedGame?.topology;
   onlineRoom = room;
+  if (!isOnlineNextGameSetup()) {
+    elements.onlineMatchMode.value = room.match?.mode ?? ONLINE_MODE_FRIEND;
+    const modelId = [BLACK, WHITE]
+      .map((color) => room.match?.controllers?.[color]?.modelId)
+      .find(Boolean);
+    elements.onlineMatchAiModel.value = normalizeAIModelId(modelId ?? aiGameModelId);
+  }
   const {
     nextRoundStarted,
     exitSetup: rematchStarted,
@@ -3280,7 +3739,11 @@ function applyOnlineRoom(room) {
   }
   if (rematchStarted || nextRoundStarted) {
     if (isReplaying()) exitReplay({ announce: false });
-    setSidebarTab("game");
+    setSidebarTab(
+      [ONLINE_MATCH_SETUP, ONLINE_MATCH_INVITED].includes(onlineMatchStatus())
+        ? "settings"
+        : "game",
+    );
   }
   onlineStateSynchronized = Boolean(
     roomClient.isConnected && room.code === roomClient.roomCode,
@@ -3298,7 +3761,7 @@ function applyOnlineRoom(room) {
   if (aiFailedPositionToken && aiFailedPositionToken !== room.positionToken) {
     aiFailedPositionToken = null;
   }
-  const roomAI = automatedSeat(room);
+  const roomAI = onlineAISeat();
   if (roomAI) aiGameModelId = normalizeAIModelId(roomAI.modelId);
   onlineClockReceivedAt = Date.now();
   if (
@@ -3311,15 +3774,34 @@ function applyOnlineRoom(room) {
   }
   game = hydratePublicGame(room.game);
   moveCount = Number.isSafeInteger(room.moveCount) ? room.moveCount : 0;
-  const onlineHasBothSeats = Boolean(
-    room.players?.some((player) => player.color === BLACK) &&
-    room.players?.some((player) => player.color === WHITE),
-  );
-  matchLifecycle = room.game.phase === PHASE_FINISHED || Boolean(room.timeControl?.outcome)
+  const roomMatchStatus = onlineMatchStatus(room);
+  matchLifecycle = roomMatchStatus === ONLINE_MATCH_FINISHED
     ? MATCH_LIFECYCLE_FINISHED
-    : onlineHasBothSeats
+    : roomMatchStatus === ONLINE_MATCH_PLAYING
       ? MATCH_LIFECYCLE_PLAYING
       : MATCH_LIFECYCLE_WAITING;
+
+  const requestRevision = room.match?.request?.requestRevision ?? null;
+  const shouldEnterOnlineSetup = [ONLINE_MATCH_SETUP, ONLINE_MATCH_INVITED].includes(
+    roomMatchStatus,
+  ) && (
+    !isOnlineNextGameSetup() ||
+    (requestRevision !== null && previousRequestRevision !== requestRevision)
+  );
+  if (shouldEnterOnlineSetup) {
+    const options = room.match?.request?.settings ?? previousGameOptions(game, room.timeControl);
+    reflectGameOptions(options);
+    rematchSetupTransport = MATCH_TRANSPORT_ONLINE;
+    rematchPreviewGame = new GoEngine(options);
+    elements.onlineMatchMode.value = room.match?.request?.mode ?? room.match?.mode ?? ONLINE_MODE_FRIEND;
+    const requestedAI = [BLACK, WHITE]
+      .map((color) => room.match?.request?.controllers?.[color]?.modelId)
+      .find(Boolean);
+    elements.onlineMatchAiModel.value = normalizeAIModelId(requestedAI ?? aiGameModelId);
+    rebuildViews(options.width, options.height, options.topology);
+    setViewMode(activeViewMode);
+    setSidebarTab("settings");
+  }
   lastPlayedPoint = game.lastMove?.type === "play"
     ? { row: game.lastMove.row, col: game.lastMove.col }
     : null;
@@ -3450,8 +3932,7 @@ async function dispatchMatchAction(action, payload = {}, options = {}) {
   const session = currentMatchSession();
   const routePayload = action === MATCH_ACTION_UNDO
     ? { expectedMoveCount: moveCount, ...(
-        session.transport === MATCH_TRANSPORT_ONLINE &&
-        session.opponentController === MATCH_CONTROLLER_AI
+        session.transport === MATCH_TRANSPORT_ONLINE
           ? onlineAIPositionExpectation()
           : {}
       ) }
@@ -3469,9 +3950,13 @@ async function dispatchMatchAction(action, payload = {}, options = {}) {
       setMessage(`KataGo 已完成判断${detail}，正在由服务器验证并同步…`);
     }
     if (action === MATCH_ACTION_UNDO) {
-      setMessage(route.command === "direct_undo_ai_round"
-        ? "正在直接撤回你和 AI 的上一轮落子…"
-        : "正在发送悔棋申请…");
+      setMessage(
+        route.command === "direct_undo_ai_round"
+          ? "正在直接撤回你和 AI 的上一轮落子…"
+          : route.command === "direct_undo_local_round"
+            ? "正在直接撤回上一手…"
+            : "正在发送悔棋申请…",
+      );
     }
     if (action === MATCH_ACTION_RESIGN) setMessage("正在提交认输…");
     return sendOnlineCommand(route.command, route.payload);
@@ -3678,6 +4163,53 @@ function getNewGameOptions() {
   };
 }
 
+function selectedOnlineMatchMode() {
+  const mode = elements.onlineMatchMode.value;
+  return [
+    ONLINE_MODE_FRIEND,
+    ONLINE_MODE_HUMAN_AI,
+    ONLINE_MODE_AI_AI,
+    ONLINE_MODE_LOCAL,
+  ].includes(mode) ? mode : ONLINE_MODE_FRIEND;
+}
+
+function onlineGameRequestPayload(options) {
+  return {
+    ...options,
+    mode: selectedOnlineMatchMode(),
+    aiModelId: normalizeAIModelId(elements.onlineMatchAiModel.value),
+  };
+}
+
+async function requestOnlineGame(options) {
+  if (!hasOnlineSession() || !isOnlineHost()) return false;
+  const status = onlineMatchStatus();
+  if (![ONLINE_MATCH_SETUP, ONLINE_MATCH_FINISHED].includes(status)) {
+    setMessage(
+      status === ONLINE_MATCH_INVITED
+        ? "当前邀请仍在等待回应；请先取消邀请再修改。"
+        : "当前对局尚未结束，不能发起新棋。",
+      true,
+    );
+    return false;
+  }
+  const mode = selectedOnlineMatchMode();
+  const modelId = normalizeAIModelId(elements.onlineMatchAiModel.value);
+  if (
+    [ONLINE_MODE_HUMAN_AI, ONLINE_MODE_AI_AI].includes(mode) &&
+    getAIModel(modelId).heavy &&
+    !window.confirm(translateText(
+      "b18 首次需要下载约 93.4 MB，并会占用数百 MB 内存与显存、增加耗电和发热。仅建议桌面端 WebGPU。确定使用吗？",
+    ))
+  ) return false;
+  setMessage(mode === ONLINE_MODE_FRIEND ? "正在发送对局邀请…" : "正在开始在线对局…");
+  const sent = await sendOnlineCommand("request_game", onlineGameRequestPayload(options));
+  if (sent && mode === ONLINE_MODE_FRIEND) {
+    setMessage("对局邀请已发出，等待对方接受。所有设置会保留在当前房间。", false);
+  }
+  return sent;
+}
+
 function getPreviousGameOptions() {
   const timeControl = hasOnlineSession() ? onlineRoom?.timeControl : localTimeControl;
   return previousGameOptions(game, timeControl);
@@ -3702,8 +4234,7 @@ function applyLocalNextGameAIState(state) {
   aiAutoplayPaused = state.autoplayPaused;
 }
 
-function reflectPreviousGameOptions() {
-  const options = getPreviousGameOptions();
+function reflectGameOptions(options) {
   setPendingDimensions(options.width, options.height);
   setPendingTopology(options.topology);
   elements.scoringRule.value = options.scoringRule;
@@ -3717,6 +4248,10 @@ function reflectPreviousGameOptions() {
     : null;
   reflectTimeControlConfig(timeControl);
   return options;
+}
+
+function reflectPreviousGameOptions() {
+  return reflectGameOptions(getPreviousGameOptions());
 }
 
 function resetLobbyPreview({ message = "" } = {}) {
@@ -3780,6 +4315,7 @@ async function startNewGame(optionsOverride = null) {
   exitReplay({ announce: false });
   cancelReplayAIReview({ terminate: true });
   const options = optionsOverride ?? getNewGameOptions();
+  if (hasOnlineSession()) return requestOnlineGame(options);
   const rematchSetup = isOnlineNextGameSetup();
   if (!rematchSetup) setSidebarTab("game");
   if (hasOnlineSession()) setMessage("正在为房间建立新棋盘…");
@@ -3837,6 +4373,13 @@ function enterNextGameSetup() {
     ? MATCH_TRANSPORT_ONLINE
     : MATCH_TRANSPORT_LOCAL;
   rematchPreviewGame = new GoEngine(options);
+  if (hasOnlineSession()) {
+    elements.onlineMatchMode.value = onlineRoom?.match?.mode ?? ONLINE_MODE_FRIEND;
+    const modelId = [BLACK, WHITE]
+      .map((color) => onlineRoom?.match?.controllers?.[color]?.modelId)
+      .find(Boolean);
+    elements.onlineMatchAiModel.value = normalizeAIModelId(modelId ?? aiGameModelId);
+  }
   setSidebarTab("settings", { focus: true });
   resetLobbyPreview({
     message: hasOnlineSession()
@@ -3848,6 +4391,10 @@ function enterNextGameSetup() {
 async function startConfiguredNextGame() {
   if (!isNextGameSetup()) return;
   if (hasOnlineSession() && !isOnlineHost()) return;
+  if (hasOnlineSession()) {
+    await startNewGame(getNewGameOptions());
+    return;
+  }
   const match = currentMatchSession();
   if (!match.capabilities.new_game) {
     setMessage(matchActionUnavailableMessage(MATCH_ACTION_NEW_GAME, match), true);
@@ -4943,6 +5490,23 @@ elements.adjustNextGame.addEventListener("click", enterNextGameSetup);
 elements.confirmNextGame.addEventListener("click", () => {
   void startConfiguredNextGame();
 });
+elements.onlineMatchMode.addEventListener("change", updateUI);
+elements.onlineMatchAiModel.addEventListener("change", updateUI);
+elements.acceptGameInvitation.addEventListener("click", () => {
+  const requestRevision = onlineRoom?.match?.request?.requestRevision;
+  if (!Number.isSafeInteger(requestRevision)) return;
+  void sendOnlineCommand("respond_game", { requestRevision, accept: true });
+});
+elements.declineGameInvitation.addEventListener("click", () => {
+  const requestRevision = onlineRoom?.match?.request?.requestRevision;
+  if (!Number.isSafeInteger(requestRevision)) return;
+  void sendOnlineCommand("respond_game", { requestRevision, accept: false });
+});
+elements.cancelGameInvitation.addEventListener("click", () => {
+  const requestRevision = onlineRoom?.match?.request?.requestRevision;
+  if (!Number.isSafeInteger(requestRevision)) return;
+  void sendOnlineCommand("cancel_game_request", { requestRevision });
+});
 
 for (const button of elements.sizeButtons) {
   button.addEventListener("click", () => {
@@ -4977,7 +5541,20 @@ function commitPendingDimensionInputs() {
     window.cancelAnimationFrame(lobbyPreviewFrame);
     lobbyPreviewFrame = null;
   }
-  setPendingDimensions(elements.customWidth.value, elements.customHeight.value);
+  const width = Number(elements.customWidth.value);
+  const height = Number(elements.customHeight.value);
+  const validWidth = Number.isInteger(width) &&
+    width >= PUBLIC_MIN_BOARD_DIMENSION && width <= MAX_BOARD_DIMENSION;
+  const validHeight = Number.isInteger(height) &&
+    height >= PUBLIC_MIN_BOARD_DIMENSION && height <= MAX_BOARD_DIMENSION;
+  elements.customWidth.setAttribute("aria-invalid", String(!validWidth));
+  elements.customHeight.setAttribute("aria-invalid", String(!validHeight));
+  setPendingDimensions(
+    validWidth ? width : pendingWidth,
+    validHeight ? height : pendingHeight,
+  );
+  elements.customWidth.setAttribute("aria-invalid", "false");
+  elements.customHeight.setAttribute("aria-invalid", "false");
   resetLobbyPreview();
   setMessage(isNextGameSetup()
     ? `下一局预览已更新为 ${pendingWidth} × ${pendingHeight}；确认后会使用这套设置。`
@@ -4988,19 +5565,17 @@ function scheduleLobbyDimensionPreview() {
   if (!isBoardSetupMode()) return;
   const width = Number(elements.customWidth.value);
   const height = Number(elements.customHeight.value);
-  const valid = [width, height].every(
-    (value) => Number.isInteger(value) &&
-      value >= PUBLIC_MIN_BOARD_DIMENSION &&
-      value <= MAX_BOARD_DIMENSION,
-  );
-  if (!valid) return;
+  const validWidth = Number.isInteger(width) &&
+    width >= PUBLIC_MIN_BOARD_DIMENSION && width <= MAX_BOARD_DIMENSION;
+  const validHeight = Number.isInteger(height) &&
+    height >= PUBLIC_MIN_BOARD_DIMENSION && height <= MAX_BOARD_DIMENSION;
+  elements.customWidth.setAttribute("aria-invalid", String(!validWidth));
+  elements.customHeight.setAttribute("aria-invalid", String(!validHeight));
+  if (!validWidth || !validHeight) return;
   if (lobbyPreviewFrame !== null) window.cancelAnimationFrame(lobbyPreviewFrame);
-  lobbyPreviewFrame = window.requestAnimationFrame(() => {
-    lobbyPreviewFrame = null;
-    if (!isBoardSetupMode()) return;
-    setPendingDimensions(width, height);
-    resetLobbyPreview();
-  });
+  lobbyPreviewFrame = null;
+  setPendingDimensions(width, height);
+  resetLobbyPreview();
 }
 
 for (const input of [elements.customWidth, elements.customHeight]) {
@@ -5185,7 +5760,7 @@ async function createOnlineRoom() {
     resetChatSessionState();
     updateRoomUrl(result.roomCode);
     closeOnlineDialog();
-    setSidebarTab("game");
+    setSidebarTab("settings");
     setMessage(`房间 ${result.roomCode} 已创建，把邀请链接发给朋友吧。`);
     // The HTTP result installs the session after the first room snapshot may
     // already have rendered. Refresh once more with the authoritative role so
@@ -5236,7 +5811,11 @@ async function joinOnlineRoom(role = "player") {
         ? "白方"
         : "旁观者";
     setMessage(`已加入房间 ${result.roomCode}，你是${roleText}。`);
-    setSidebarTab("game");
+    setSidebarTab(
+      [ONLINE_MATCH_SETUP, ONLINE_MATCH_INVITED].includes(onlineMatchStatus())
+        ? "settings"
+        : "game",
+    );
     // Joining can emit the first state before RoomClient exposes the new
     // identity. Re-render after the session is installed so spectators are
     // immediately read-only and player controls reflect the assigned seat.
@@ -5394,6 +5973,39 @@ elements.onlineForm.addEventListener("submit", (event) => event.preventDefault()
 elements.createRoom.addEventListener("click", () => void createOnlineRoom());
 elements.joinRoom.addEventListener("click", () => void joinOnlineRoom());
 elements.watchRoom.addEventListener("click", () => void joinOnlineRoom("spectator"));
+elements.lobbyCreateRoom.addEventListener("click", () => {
+  navigateAppPath("/single?connect=create");
+});
+elements.lobbyJoinRoom.addEventListener("click", () => {
+  navigateAppPath("/single?connect=join");
+});
+elements.lobbyRefresh.addEventListener("click", () => void refreshLobby({ announce: true }));
+for (const button of elements.lobbyStatusButtons) {
+  button.addEventListener("click", () => {
+    lobbyStatusFilter = button.dataset.lobbyStatus || "all";
+    for (const candidate of elements.lobbyStatusButtons) {
+      const active = candidate === button;
+      candidate.classList.toggle("active", active);
+      candidate.setAttribute("aria-pressed", String(active));
+    }
+    void renderLobbyRooms();
+  });
+}
+for (const filter of [
+  elements.lobbyTopologyFilter,
+  elements.lobbySizeFilter,
+  elements.lobbyModeFilter,
+]) {
+  filter.addEventListener("change", () => void renderLobbyRooms());
+}
+elements.lobbyRoomList.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-lobby-room]");
+  if (!target) return;
+  const code = sanitizeRoomCode(target.dataset.lobbyRoom);
+  if (!code) return;
+  const role = target.dataset.lobbyRole === "spectator" ? "spectator" : "";
+  navigateAppPath(onlineRoomPath(code, role));
+});
 elements.copyRoomLink.addEventListener("click", () => void copyInvitationLink());
 elements.leaveRoom.addEventListener("click", () => void leaveOnlineRoom());
 elements.attachRoomAi.addEventListener("click", showAIDialog);
@@ -5549,10 +6161,32 @@ applyDocumentTranslations(document);
 rememberOfflineGame();
 clockTimer = window.setInterval(tickClock, 250);
 
-const sharedRoomCode = sanitizeRoomCode(
-  new URL(window.location.href).searchParams.get("room"),
-);
-if (sharedRoomCode.length === 6) {
+const initialUrl = new URL(window.location.href);
+let initialRoute = parseAppRoute(initialUrl);
+const legacyShare = parseShareUrl(initialUrl);
+if (
+  initialRoute.mode !== "lobby" &&
+  initialRoute.mode !== "online" &&
+  legacyShare.roomCode.length === 6
+) {
+  initialRoute = {
+    mode: "online",
+    roomCode: legacyShare.roomCode,
+    role: legacyShare.role,
+  };
+}
+
+if (initialRoute.mode === "root") {
+  replaceAppPath("/single");
+  initialRoute = { mode: "single", roomCode: "", role: "" };
+} else if (initialRoute.mode === "single" && initialUrl.pathname !== "/single") {
+  replaceAppPath("/single");
+}
+
+showAppScreen(initialRoute.mode);
+if (initialRoute.mode === "online" && initialRoute.roomCode.length === 6) {
+  const sharedRoomCode = initialRoute.roomCode;
+  replaceAppPath(onlineRoomPath(sharedRoomCode, initialRoute.role));
   elements.roomCodeInput.value = sharedRoomCode;
   if (roomClient.resumeRoom(sharedRoomCode)) {
     updateRoomUrl(sharedRoomCode);
@@ -5560,7 +6194,13 @@ if (sharedRoomCode.length === 6) {
     updateRoomUI();
   } else {
     showOnlineDialog(sharedRoomCode);
+    if (initialRoute.role === "spectator") {
+      setMessage("这是观战入口；填写名字后请选择“进入观战”。");
+    }
   }
+} else if (initialRoute.mode === "single" && initialUrl.searchParams.has("connect")) {
+  replaceAppPath("/single");
+  showOnlineDialog();
 }
 
 const unlockGameSounds = () => void gameSounds.unlock();
@@ -5572,6 +6212,7 @@ window.addEventListener(
   () => {
     cancelAIThinking();
     cancelReplayAIReview({ terminate: true });
+    stopLobbyRefresh();
     if (clockTimer !== null) window.clearInterval(clockTimer);
     cylinderView.destroy();
     torusView.destroy();

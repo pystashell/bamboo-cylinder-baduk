@@ -7,6 +7,10 @@ import {
 } from "./pointerGestures.js";
 import { translateText } from "../i18n.js";
 import {
+  createAnalysisVariationMarker,
+  placeAnalysisVariationMarker,
+} from "./analysisVariationMarkers.js";
+import {
   createTerritoryMarkerLayer,
   disposeTerritoryMarkerLayer,
   territoryPointsForPosition,
@@ -611,18 +615,14 @@ export class CylinderBoard {
       !Number.isInteger(row) || !Number.isInteger(col) ||
       row < 0 || row >= this.height || col < 0 || col >= this.width
     ) return;
-    const frame = this.frame(row, col, 0.286);
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.105, 0.145 + Math.min(index, 4) * 0.006, 28),
-      new THREE.MeshBasicMaterial({
-        color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
-        side: THREE.DoubleSide,
-        depthTest: true,
-      }),
-    );
-    ring.position.copy(frame.position);
-    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
-    this.markersGroup.add(ring);
+    const frame = this.frame(row, col, 0);
+    const marker = createAnalysisVariationMarker(entry, index, { radius: 0.19 });
+    placeAnalysisVariationMarker(marker, {
+      position: frame.position,
+      normal: frame.normal,
+      surfaceOffset: 0.286,
+    });
+    this.markersGroup.add(marker);
   }
 
   addReferenceMarker(row, col, occupied) {

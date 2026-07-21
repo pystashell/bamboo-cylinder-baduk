@@ -58,8 +58,14 @@ export function onlineNextGameTransition({
   const previousRoundFinished = Boolean(
     previousRoom?.game?.phase === "finished" || previousRoom?.timeControl?.outcome,
   );
+  const negotiatedRoundStarted = Boolean(
+    Number.isSafeInteger(previousRoom?.match?.roundId) &&
+    Number.isSafeInteger(nextRoom?.match?.roundId) &&
+    nextRoom.match.roundId > previousRoom.match.roundId &&
+    nextRoom.match.status === "playing",
+  );
   const nextRoundStarted = Boolean(
-    previousRoundFinished &&
+    (previousRoundFinished || negotiatedRoundStarted) &&
     positionChanged &&
     nextRoom?.game?.phase === "play" &&
     !nextRoom?.timeControl?.outcome &&

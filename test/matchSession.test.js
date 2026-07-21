@@ -7,9 +7,11 @@ import {
   MATCH_TRANSPORT_LOCAL,
   MATCH_TRANSPORT_ONLINE,
   automatedSeat,
+  controllerOperatorsFromRoom,
   controllersFromRoom,
   createMatchSession,
   isHumanOnlineMatch,
+  isSameBrowserHumanOnlineMatch,
   routeMatchAction,
   shouldProtectOnlineAITurn,
 } from "../src/game/matchSession.js";
@@ -31,6 +33,53 @@ test("room seats project into independent transport and controller axes", () => 
     black: MATCH_CONTROLLER_HUMAN,
     white: MATCH_CONTROLLER_AI,
   });
+});
+
+test("persistent match controllers override legacy seat inference", () => {
+  const room = {
+    players: [{ id: "host", role: "player", color: "black" }],
+    match: {
+      controllers: {
+        black: { kind: "ai", operatorId: "host", modelId: "b10" },
+        white: { kind: "ai", operatorId: "host", modelId: "b18" },
+      },
+    },
+  };
+  assert.deepEqual(controllersFromRoom(room), { black: "ai", white: "ai" });
+  assert.deepEqual(controllerOperatorsFromRoom(room), { black: "host", white: "host" });
+});
+
+test("one online browser can control both human colors", () => {
+  const session = createMatchSession({
+    transport: MATCH_TRANSPORT_ONLINE,
+    controllerByColor: { black: "human", white: "human" },
+    controllerOperatorByColor: { black: "host", white: "host" },
+    identity: { id: "host", role: "player", color: "black" },
+    phase: "play",
+    currentPlayer: "white",
+    connected: true,
+    roomReady: true,
+    bothSeats: true,
+  });
+  assert.deepEqual(session.controlledColors, ["black", "white"]);
+  assert.equal(session.capabilities.play, true);
+  assert.equal(session.capabilities.pass, true);
+
+  const otherMember = createMatchSession({
+    transport: MATCH_TRANSPORT_ONLINE,
+    controllerByColor: { black: "human", white: "human" },
+    controllerOperatorByColor: { black: "host", white: "host" },
+    identity: { id: "friend", role: "player", color: "white" },
+    phase: "play",
+    currentPlayer: "white",
+    connected: true,
+    roomReady: true,
+    bothSeats: true,
+    undoAvailable: true,
+  });
+  assert.deepEqual(otherMember.controlledColors, []);
+  assert.equal(otherMember.capabilities.undo, false);
+  assert.equal(isSameBrowserHumanOnlineMatch(otherMember), false);
 });
 
 test("local and online sessions expose the same action capability vocabulary", () => {
@@ -181,10 +230,22 @@ test("online AI undo routes directly while human online undo negotiates", () => 
     ...base,
     controllerByColor: { black: "human", white: "human" },
   });
+  const sameBrowserHumans = createMatchSession({
+    ...base,
+    controllerByColor: { black: "human", white: "human" },
+    controllerOperatorByColor: { black: "host", white: "host" },
+    identity: { id: "host", role: "player", color: "black" },
+  });
   assert.equal(routeMatchAction(ai, "undo").command, "direct_undo_ai_round");
   assert.equal(routeMatchAction(human, "undo").command, "request_undo");
+  assert.equal(
+    routeMatchAction(sameBrowserHumans, "undo").command,
+    "direct_undo_local_round",
+  );
   assert.equal(isHumanOnlineMatch(ai), false);
   assert.equal(isHumanOnlineMatch(human), true);
+  assert.equal(isSameBrowserHumanOnlineMatch(human), false);
+  assert.equal(isSameBrowserHumanOnlineMatch(sameBrowserHumans), true);
 });
 
 test("AI actor uses the same play and pass actions with transport-specific adapters", () => {

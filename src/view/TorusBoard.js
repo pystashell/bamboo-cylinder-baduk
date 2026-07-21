@@ -18,6 +18,10 @@ import {
 } from "./playerViewLighting.js";
 import { translateText } from "../i18n.js";
 import {
+  createAnalysisVariationMarker,
+  placeAnalysisVariationMarker,
+} from "./analysisVariationMarkers.js";
+import {
   createTerritoryMarkerLayer,
   disposeTerritoryMarkerLayer,
   territoryPointsForPosition,
@@ -628,18 +632,14 @@ export class TorusBoard {
       !Number.isInteger(row) || !Number.isInteger(col) ||
       row < 0 || row >= this.height || col < 0 || col >= this.width
     ) return;
-    const frame = this.frame(row, col, 0.278);
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.098, 0.138 + Math.min(index, 4) * 0.006, 28),
-      new THREE.MeshBasicMaterial({
-        color: entry?.color === "white" ? 0x17201d : 0xf5e8b7,
-        side: THREE.DoubleSide,
-        depthTest: true,
-      }),
-    );
-    ring.position.copy(frame.position);
-    ring.quaternion.setFromUnitVectors(LOCAL_FORWARD, frame.normal);
-    this.markersGroup.add(ring);
+    const frame = this.frame(row, col, 0);
+    const marker = createAnalysisVariationMarker(entry, index, { radius: 0.18 });
+    placeAnalysisVariationMarker(marker, {
+      position: frame.position,
+      normal: frame.normal,
+      surfaceOffset: 0.278,
+    });
+    this.markersGroup.add(marker);
   }
 
   addReferenceMarker(row, col, occupied) {

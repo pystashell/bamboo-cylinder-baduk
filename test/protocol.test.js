@@ -48,7 +48,12 @@ test("protocol v2 is explicit while stale socket names remain detectable", () =>
 });
 
 test("undo room actions pass through the WebSocket command whitelist", () => {
-  for (const action of ["request_undo", "respond_undo", "cancel_undo"]) {
+  for (const action of [
+    "request_undo",
+    "respond_undo",
+    "cancel_undo",
+    "direct_undo_local_round",
+  ]) {
     assert.ok(ROOM_ACTIONS.includes(action));
     assert.deepEqual(
       normalizeCommandMessage({

@@ -227,6 +227,83 @@ test("lobby lifecycle and rectangular preview copy is available in English", () 
   );
 });
 
+test("public lobby and online invitation copy is available in English", () => {
+  initializeI18n({
+    storage: memoryStorage(),
+    languages: ["en-US"],
+    document: fakeDocument([]),
+    observe: false,
+  });
+  const cases = [
+    ["奇异棋盘在线大厅", "Unusual Board Online Lobby"],
+    ["输入房间号", "Enter room code"],
+    ["公开房间", "Public rooms"],
+    ["好友对战", "Friend match"],
+    ["人机对战", "Human vs AI"],
+    ["同机双人", "Same-device two-player"],
+    ["等待设置", "Waiting for setup"],
+    ["等待接受", "Waiting for acceptance"],
+    ["正在进行", "In progress"],
+    ["已经结束", "Finished"],
+    ["房间 ABC123", "Room ABC123"],
+    ["第 3 局", "Game 3"],
+    ["3 分钟前", "3 minutes ago"],
+    ["1 小时前", "1 hour ago"],
+    ["2 人观战 · 刚刚更新", "2 spectators · updated just now"],
+    ["3 人观战 · 4 分钟前", "3 spectators · 4 minutes ago"],
+    ["共 12 个公开房间 · 自动刷新", "12 public rooms · auto-refreshing"],
+    ["返回房间", "Return to room"],
+    ["观战", "Watch"],
+    ["正在读取公开房间…", "Loading public rooms…"],
+    ["暂时无法读取在线大厅。", "The online lobby is temporarily unavailable."],
+    ["好友对局", "Friend match"],
+    ["在线人机", "Online human vs AI"],
+    ["在线 AI 对弈", "Online AI vs AI"],
+    ["在线同机双人", "Online same-device two-player"],
+    ["等待被邀请方回应。", "Waiting for the invited player to respond."],
+    ["19 × 13 · 甜甜圈 · 日本规则", "19 × 13 · Torus · Japanese rules"],
+    ["设置并发起一盘新棋", "Configure and start a new game"],
+    ["对局邀请等待回应", "Game invitation awaiting response"],
+    [
+      "KataGo 在浏览器运行，朋友可以观战",
+      "KataGo runs in the browser while friends spectate",
+    ],
+    ["房间对局已同步给所有成员", "This room game is synced to everyone"],
+    [
+      "房间已经建立。请在棋盘设置中确认配置并发起对局。",
+      "The room is ready. Confirm the configuration under Board Settings and start a game.",
+    ],
+    [
+      "房主正在准备下一盘棋；你可以继续聊天或等待邀请。",
+      "The host is preparing the next game; you can keep chatting or wait for an invitation.",
+    ],
+    [
+      "邀请已发出，等待对方接受或拒绝。",
+      "The invitation was sent. Waiting for the other player to accept or decline.",
+    ],
+    [
+      "房主发来了对局邀请，请接受或拒绝。",
+      "The host sent a game invitation. Accept or decline it.",
+    ],
+    ["房主邀请你开始对局", "The host invites you to start"],
+    ["等待受邀玩家回应", "Waiting for the invited player"],
+    ["使用当前设置发起对局邀请", "Send invitation with these settings"],
+    ["使用当前设置开始在线对局", "Start online game with these settings"],
+    [
+      "当前邀请仍在等待回应；请先取消邀请再修改。",
+      "The current invitation is still awaiting a response. Cancel it before making changes.",
+    ],
+    ["正在发送对局邀请…", "Sending game invitation…"],
+    ["正在开始在线对局…", "Starting online game…"],
+    ["下一局设置", "Next-game settings"],
+    ["张三 · 同机 · 在线", "张三 · same device · online"],
+    ["王五 · 同机 · 暂时离线", "王五 · same device · temporarily offline"],
+  ];
+  for (const [source, expected] of cases) {
+    assert.equal(translateText(source), expected, source);
+  }
+});
+
 test("long AI, SGF, replay and scoring status sentences translate before generic patterns", () => {
   initializeI18n({
     storage: memoryStorage(),
