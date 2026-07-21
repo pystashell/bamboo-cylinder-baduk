@@ -61,6 +61,8 @@ export const ENGLISH_DYNAMIC = Object.freeze({
   "直接进行下一局": "Start next game now",
   "调整下一局设置": "Adjust next-game settings",
   "退出房间": "Leave Room",
+  "关闭本页联机": "Disconnect this tab",
+  "忘记房间": "Forget room",
   "留在房间等待下一局": "Stay and wait for the next game",
   "正在当前房间设置下一局；确认后会同步给所有玩家和观众。": "Configuring the next game in this room. It will sync to all players and spectators when confirmed.",
   "黑方房主正在设置下一局；聊天和房间成员都会保留。": "The Black host is configuring the next game. Chat and room members will be kept.",

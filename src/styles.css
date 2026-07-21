@@ -1047,6 +1047,13 @@ summary:focus-visible {
   font-size: 10px;
 }
 
+.room-actions .room-leave-action {
+  min-width: 96px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-weight: 700;
+}
+
 .room-ai-actions {
   display: grid;
   grid-template-columns: 1fr auto;

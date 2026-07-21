@@ -2937,7 +2937,7 @@ function updateRoomUI() {
     ? "关闭本页联机"
     : canAbandonRoom
       ? "忘记房间"
-      : "退出";
+      : "退出房间";
   elements.passButton.disabled = !match.capabilities.pass;
   elements.newGameButton.disabled = true;
   const finished = matchLifecycle === MATCH_LIFECYCLE_FINISHED;

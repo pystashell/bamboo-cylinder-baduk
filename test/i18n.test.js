@@ -219,6 +219,8 @@ test("lobby lifecycle and rectangular preview copy is available in English", () 
   assert.equal(translateText("直接进行下一局"), "Start next game now");
   assert.equal(translateText("调整下一局设置"), "Adjust next-game settings");
   assert.equal(translateText("退出房间"), "Leave Room");
+  assert.equal(translateText("关闭本页联机"), "Disconnect this tab");
+  assert.equal(translateText("忘记房间"), "Forget room");
   assert.equal(
     translateText("使用当前设置开始下一局"),
     "Start next game with these settings",
